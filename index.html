@@ -171,6 +171,7 @@ details summary{cursor:pointer;font-weight:500}
     <button class="btn ghost small" id="b-handCancel">Abandonner</button>
     <button class="btn ghost small" id="b-torch" hidden>Torche</button>
     <span class="spacer"></span>
+    <button class="btn ghost small" id="b-wasm" hidden>Changer de moteur</button>
     <button class="btn ghost small" id="b-skipHand" hidden>Ignorer cette main</button>
   </div>
 </section>
@@ -382,10 +383,12 @@ async function checkTerminal(){
    Détection — Human (TensorFlow.js)
    --------------------------------------------------------------------- */
 let human = null;
+// ?backend=wasm contourne les processeurs graphiques mobiles qui renvoient des valeurs invalides (NaN)
+const BACKEND = new URLSearchParams(location.search).get('backend') === 'wasm' ? 'wasm' : 'webgl';
 async function getHuman(){
   if (human) return human;
   human = new Human({
-    modelBasePath: CFG.MODELS, backend: 'webgl', debug: false, cacheSensitivity: 0, warmup: 'none',
+    modelBasePath: CFG.MODELS, backend: BACKEND, debug: false, cacheSensitivity: 0, warmup: 'none',
     filter: { enabled: true, equalization: false, flip: false },
     face: { enabled: true,
       detector: { rotation: true, maxDetected: 2, minConfidence: 0.5, skipFrames: 2, skipTime: 150 },
@@ -393,7 +396,7 @@ async function getHuman(){
       emotion: { enabled: false }, description: { enabled: false },
       antispoof: { enabled: true, skipFrames: 10, skipTime: 500 },
       liveness: { enabled: true, skipFrames: 10, skipTime: 500 } },
-    hand: { enabled: true, maxDetected: 2, minConfidence: 0.55, rotation: true, skipFrames: 1, skipTime: 80, landmarks: true },
+    hand: { enabled: true, maxDetected: 2, minConfidence: 0.55, rotation: false, skipFrames: 1, skipTime: 80, landmarks: true },
     body: { enabled: false }, object: { enabled: false }, segmentation: { enabled: false }, gesture: { enabled: false },
   });
   await human.load();
@@ -703,10 +706,11 @@ function fingerQuality(c){
 }
 function drawHandOverlay(canvas, video, hs, info, good, fingers, sheet, k){
   const { ctx, P, s } = fitCover(canvas, video.videoWidth, video.videoHeight);
-  if (sheet?.L){
+  const sc = sheet?.use;
+  if (sc?.L){
     ctx.strokeStyle = sheet.ok ? '#3fd08a' : '#f2c14b'; ctx.lineWidth = 3; ctx.setLineDash([10,6]);
-    for (const E of [sheet.L, sheet.R]){
-      const a = sheetToDet(sheet, E.a+E.b*sheet.y0, sheet.y0), b = sheetToDet(sheet, E.a+E.b*sheet.y1, sheet.y1);
+    for (const E of [sc.L, sc.R]){
+      const a = sheetToDet(sc, E.a+E.b*sc.v0, sc.v0), b = sheetToDet(sc, E.a+E.b*sc.v1, sc.v1);
       const [x0,y0] = P(a[0]/k, a[1]/k), [x1,y1] = P(b[0]/k, b[1]/k); ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -731,54 +735,77 @@ async function setTorch(stream, on){
   try { await tr.applyConstraints({ advanced:[{ torch:on }] }); torchOn = on; return true; } catch { return false; }
 }
 /* Feuille blanche de référence : fond uniforme, plan connu, et règle graduée.
-   La distance entre les deux grands bords de la feuille (210 mm pour l'A4) donne l'échelle exacte.
-   La détection travaille le long du grand axe de l'image : bords gauche/droite en paysage,
-   bords haut/bas en portrait (l'image est alors tournée d'un quart de tour avant l'analyse). */
-const sheetCv = document.createElement('canvas');
-function detectSheet(det){
-  const portrait = det.height > det.width;
-  const W = portrait ? det.height : det.width, H = portrait ? det.width : det.height;
-  sheetCv.width = W; sheetCv.height = H; const sctx = sheetCv.getContext('2d', { willReadFrequently:true });
-  sctx.setTransform(1,0,0,1,0,0);
-  if (portrait){ sctx.translate(W,0); sctx.rotate(Math.PI/2); }
-  sctx.drawImage(det,0,0); sctx.setTransform(1,0,0,1,0,0);
-  const d = sctx.getImageData(0,0,W,H).data;
-  const hist = new Uint32Array(256); let tot = 0;
-  for (let i=0;i<d.length;i+=16){ hist[(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])|0]++; tot++; }
-  let acc=0, p95=255; for (let v=0; v<256; v++){ acc+=hist[v]; if (acc >= tot*0.95){ p95=v; break; } }
-  const thr = Math.max(110, p95*0.78);
-  const white = (x,y) => { const i=(y*W+x)*4, r=d[i], g=d[i+1], b=d[i+2]; return (0.299*r+0.587*g+0.114*b) >= thr && Math.max(r,g,b)-Math.min(r,g,b) < 50; };
-  const RUN = Math.max(4, Math.round(W/160)); const rows = []; let scanned = 0;
-  for (let y=Math.round(H*0.05); y<H*0.95; y+=4){
-    scanned++; let xl=-1, xr=-1, run=0;
-    for (let x=0; x<W; x++){ if (white(x,y)){ if (++run >= RUN){ xl = x-RUN+1; break; } } else run=0; }
-    run=0; for (let x=W-1; x>=0; x--){ if (white(x,y)){ if (++run >= RUN){ xr = x+RUN-1; break; } } else run=0; }
-    if (xl >= 0 && xr > xl && (xr-xl) > W*0.5) rows.push([y,xl,xr]);
+   Une feuille A4 mesure 210 × 297 mm. Téléphone tenu en portrait, la feuille posée EN LARGEUR :
+   ses deux grands bords (210 mm d'écart) apparaissent en haut et en bas de l'écran, ses petits
+   bords sortent à gauche et à droite. L'écart entre les deux grands bords donne l'échelle.
+   Le module cherche les bords dans les deux directions afin de reconnaître une feuille mal orientée. */
+function otsu(hist, total){
+  let sum=0; for (let i=0;i<256;i++) sum += i*hist[i];
+  let sumB=0, wB=0, best=0, thr=128;
+  for (let t=0;t<256;t++){ wB += hist[t]; if (!wB) continue; const wF = total - wB; if (!wF) break; sumB += t*hist[t];
+    const mB = sumB/wB, mF = (sum-sumB)/wF, v = wB*wF*(mB-mF)*(mB-mF); if (v > best){ best = v; thr = t; } }
+  return thr;
+}
+// Balaye des lignes parallèles à l'axe u et cherche, sur chacune, le premier et le dernier blanc.
+function scanAxis(white, U, V){
+  const RUN = Math.max(4, Math.round(U/160)); const rows = []; let scanned = 0;
+  for (let v=Math.round(V*0.05); v<V*0.95; v+=4){
+    scanned++; let a=-1, b=-1, run=0;
+    for (let u=0; u<U; u++){ if (white(u,v)){ if (++run >= RUN){ a = u-RUN+1; break; } } else run=0; }
+    run=0; for (let u=U-1; u>=0; u--){ if (white(u,v)){ if (++run >= RUN){ b = u+RUN-1; break; } } else run=0; }
+    if (a >= 0 && b > a && (b-a) > U*0.4) rows.push([v,a,b]);
   }
-  const out = { ok:false, rows: rows.length, portrait, W, H };
-  if (rows.length < scanned*0.4){ out.reason = 'absente'; return out; }
+  const out = { found:false, coverage: scanned ? rows.length/scanned : 0, U, V };
+  if (out.coverage < 0.35) return out;
   const fit = (pts) => { const n=pts.length; let sy=0,sx=0,syy=0,sxy=0; for (const [y,x] of pts){ sy+=y; sx+=x; syy+=y*y; sxy+=x*y; } const b=(n*sxy-sy*sx)/((n*syy-sy*sy)||1); return { a:(sx-b*sy)/n, b }; };
   let L = fit(rows.map(r=>[r[0],r[1]])), R = fit(rows.map(r=>[r[0],r[2]]));
-  // la main ou une ombre peut mordre sur un bord : on écarte les lignes aberrantes et on réajuste
-  const keep = rows.filter(r => Math.abs(r[1]-(L.a+L.b*r[0])) < W*0.015 && Math.abs(r[2]-(R.a+R.b*r[0])) < W*0.015);
-  if (keep.length >= rows.length*0.6){ L = fit(keep.map(r=>[r[0],r[1]])); R = fit(keep.map(r=>[r[0],r[2]])); }
-  const y0 = rows[0][0], y1 = rows.at(-1)[0], wAt = (y) => (R.a+R.b*y) - (L.a+L.b*y);
+  const keep = rows.filter(r => Math.abs(r[1]-(L.a+L.b*r[0])) < U*0.015 && Math.abs(r[2]-(R.a+R.b*r[0])) < U*0.015);
+  if (keep.length >= rows.length*0.5){ L = fit(keep.map(r=>[r[0],r[1]])); R = fit(keep.map(r=>[r[0],r[2]])); }
+  const v0 = rows[0][0], v1 = rows.at(-1)[0], wAt = (v) => (R.a+R.b*v) - (L.a+L.b*v);
   const theta = Math.atan((L.b+R.b)/2);
-  Object.assign(out, { L, R, y0, y1, angle: theta*180/Math.PI, parallel: wAt(y0)/wAt(y1), widthPx: wAt((y0+y1)/2)*Math.cos(theta) });
-  out.clipped = (L.a+L.b*y0) <= 3 || (L.a+L.b*y1) <= 3 || (R.a+R.b*y0) >= W-4 || (R.a+R.b*y1) >= W-4;
-  out.reason = out.clipped ? 'coupee' : Math.abs(out.angle) > 12 ? 'inclinee' : Math.abs(1-out.parallel) > 0.08 ? 'perspective' : '';
-  out.ok = !out.reason;
+  Object.assign(out, { found:true, L, R, v0, v1, angle: theta*180/Math.PI, parallel: wAt(v0)/wAt(v1), sepPx: wAt((v0+v1)/2)*Math.cos(theta) });
+  out.clipped = Math.min(L.a+L.b*v0, L.a+L.b*v1) <= 3 || Math.max(R.a+R.b*v0, R.a+R.b*v1) >= U-4;
   return out;
 }
-// coordonnées de l'image d'analyse (éventuellement tournée) → image de détection
-function sheetToDet(s, u, v){ return s.portrait ? [v, s.W - u] : [u, v]; }
+function detectSheet(det){
+  const W = det.width, H = det.height;
+  const d = det.getContext('2d', { willReadFrequently:true }).getImageData(0,0,W,H).data;
+  const hist = new Uint32Array(256); let tot = 0;
+  for (let i=0;i<d.length;i+=8){ hist[(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])|0]++; tot++; }
+  const thr = Math.max(90, otsu(hist, tot));
+  const mask = new Uint8Array(W*H);
+  for (let p=0,i=0; p<mask.length; p++, i+=4){ const r=d[i], g=d[i+1], b=d[i+2], mx=Math.max(r,g,b);
+    mask[p] = (0.299*r+0.587*g+0.114*b) > thr && (mx-Math.min(r,g,b)) < Math.max(40, 0.3*mx) ? 1 : 0; }
+  const portrait = H > W;
+  // axe long : en portrait, colonnes balayées de haut en bas (u = y, v = x)
+  const longS  = portrait ? scanAxis((u,v)=>mask[u*W+v], H, W) : scanAxis((u,v)=>mask[v*W+u], W, H);
+  const shortS = portrait ? scanAxis((u,v)=>mask[v*W+u], W, H) : scanAxis((u,v)=>mask[u*W+v], H, W);
+  longS.alongY = portrait; shortS.alongY = !portrait;
+  const s = { ok:false, thr, portrait, long: longS, short: shortS, whiteShare: mask.reduce((a,b)=>a+b,0)/mask.length };
+  const good = (x) => x.found && !x.clipped;
+  if (good(longS) && good(shortS)){ s.reason = 'entiere'; s.use = longS; s.mm = 297; }
+  else if (good(longS)){ s.use = longS; s.mm = CFG.SHEET.WIDTH_MM; s.reason = Math.abs(longS.angle) > 12 ? 'inclinee' : Math.abs(1-longS.parallel) > 0.08 ? 'perspective' : ''; }
+  else if (good(shortS)){ s.reason = 'sens'; s.use = shortS; }
+  else if (longS.found || shortS.found){ s.reason = 'coupee'; s.use = longS.found ? longS : shortS; }
+  else s.reason = 'absente';
+  s.ok = !s.reason;
+  if (s.use){ s.angle = s.use.angle; s.parallel = s.use.parallel; s.sepPx = s.use.sepPx; }
+  return s;
+}
+// point (u, v) d'un balayage → coordonnées de l'image de détection
+function sheetToDet(scan, u, v){ return scan.alongY ? [v, u] : [u, v]; }
 function sheetAdvice(s){
   const bords = s.portrait ? 'haut et bas' : 'gauche et droit';
-  if (s.reason === 'absente') return [`Posez une feuille blanche ${CFG.SHEET.LABEL}`, s.portrait ? 'Sur une table sombre, en largeur devant vous. Placez-la main dessus, doigts vers le haut de l\'écran.' : 'Sur une table sombre, bords longs à gauche et à droite de l\'image.'];
-  if (s.reason === 'coupee') return ['Éloignez un peu le téléphone', `Les bords ${bords} de la feuille doivent être visibles en entier.`];
-  if (s.reason === 'inclinee') return ['Alignez la feuille', `Ses bords ${bords} doivent être parallèles au cadre de l'écran.`];
-  return ['Tenez le téléphone à plat', 'Parallèle à la feuille, juste au-dessus de la main.'];
+  switch (s.reason){
+    case 'absente': return [`Posez une feuille blanche ${CFG.SHEET.LABEL}`, s.portrait ? 'Sur une table sombre, en largeur devant vous. Posez la main dessus, doigts vers le haut de l\'écran.' : 'Sur une table sombre, grands bords à gauche et à droite de l\'image.'];
+    case 'sens':    return ['Tournez la feuille d\'un quart de tour', `Posez-la en largeur : ses grands bords doivent apparaître en ${bords} de l'écran.`];
+    case 'entiere': return ['Rapprochez le téléphone', `La feuille est en largeur ? Ses bords ${bords} seuls doivent rester visibles.`];
+    case 'coupee':  return ['Éloignez un peu le téléphone', `Les bords ${bords} de la feuille doivent être visibles en entier.`];
+    case 'inclinee':return ['Alignez la feuille', `Ses bords ${bords} doivent être parallèles au cadre de l'écran.`];
+    default:        return ['Tenez le téléphone à plat', 'Parallèle à la feuille, juste au-dessus de la main.'];
+  }
 }
+const REASON_FR = { absente:'non trouvée', sens:'mal orientée', entiere:'trop loin', coupee:'coupée', inclinee:'inclinée', perspective:'téléphone penché', '':'détectée' };
 function stepIntro(step){
   return step.kind === 'quatre'
     ? [`${step.label}, dos contre la feuille`, 'Paume vers l\'objectif, quatre doigts à plat, tendus et serrés. Tenez le téléphone à plat, de l\'autre main.']
@@ -791,7 +818,7 @@ async function captureHand(step){
   instr($('handInstr'), ...stepIntro(step));
   const H = await getHuman();
   const det = document.createElement('canvas');
-  let stable = 0, prevTips = null;
+  let stable = 0, prevTips = null, nanFrames = 0;
   const HC = CFG.HAND;
   return new Promise((resolve) => {
     let skip = false; $('b-skipHand').onclick = () => { skip = true; };
@@ -804,9 +831,12 @@ async function captureHand(step){
       let res;
       try { res = await H.detect(det, { face:{ enabled:false }, hand:{ enabled:true } }); }
       catch(e){ return resolve({ error:'moteur de détection : '+e.message }); }
-      const hands = (res.hand || []).filter(h => h.score > 0.5).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
+      const raw = (res.hand || []).filter(h => h.score > 0.5);
+      const finite = (h) => h.keypoints?.length === 21 && h.keypoints.every(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+      if (raw.length && !raw.some(finite)){ if (++nanFrames === 20) log(`points de la main invalides (NaN) sur le moteur ${BACKEND}`); } else nanFrames = 0;
+      const hands = raw.filter(finite).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
       const sheet = detectSheet(det);
-      const ppiSheet = sheet.ok ? (sheet.widthPx / k) / CFG.SHEET.WIDTH_MM * 25.4 : null;
+      const ppiSheet = sheet.ok ? (sheet.sepPx / k) / sheet.mm * 25.4 : null;
       let A = null, c = {};
       if (hands.length === 1){ A = handAnalysis(hands[0], vw, step); A.ppiPhalange = A.ppi; if (ppiSheet) A.ppi = ppiSheet; }
       c.feuille = sheet.ok || !CFG.SHEET.REQUIRED;
@@ -827,8 +857,14 @@ async function captureHand(step){
       chips($('handChips'), step.kind === 'quatre'
         ? [sheetChip, ['une main', c.presence?'ok':'ko'], [`main ${side} · paume`, c.main?'ok':'ko'], ['doigts tendus', c.doigts?'ok':'warn'], ppiChip, ['échelle cohérente', c.coherence?'ok':'warn'], ['stable', c.stable?'ok':'warn']]
         : [sheetChip, ['une main', c.presence?'ok':'ko'], ['pouce tendu', c.doigts?'ok':'warn'], ['autres doigts repliés', A?.folded?'ok':'warn'], ppiChip, ['stable', c.stable?'ok':'warn']]);
-      $('handMetrics').innerHTML = (sheet.rows ? `feuille : inclinaison <b>${(sheet.angle??0).toFixed(1)}°</b> parallélisme <b>${(sheet.parallel??0).toFixed(3)}</b> ` : '') + (A ? `résolution <b>${Math.round(A.ppi)} ppi</b> (phalange <b>${Math.round(A.ppiPhalange)}</b>) ` : '') + `vidéo <b>${vw}×${vh}</b> torche <b>${torchOn?'oui':'non'}</b>`;
-      if (!sheet.ok && CFG.SHEET.REQUIRED) instr($('handInstr'), ...sheetAdvice(sheet), sheet.reason==='absente' ? '' : 'alert');
+      const pct = (x) => Math.round(x*100);
+      $('handMetrics').innerHTML = `feuille <b>${REASON_FR[sheet.reason]}</b> seuil <b>${sheet.thr}</b> blanc <b>${pct(sheet.whiteShare)} %</b> bords <b>${pct(sheet.long.coverage)}/${pct(sheet.short.coverage)} %</b> `
+        + (sheet.use ? `inclinaison <b>${sheet.angle.toFixed(1)}°</b> parallélisme <b>${sheet.parallel.toFixed(3)}</b> ` : '')
+        + (A ? `résolution <b>${Math.round(A.ppi)} ppi</b> (phalange <b>${Math.round(A.ppiPhalange)}</b>) ` : '')
+        + `vidéo <b>${vw}×${vh}</b> moteur <b>${BACKEND}</b> torche <b>${torchOn?'oui':'non'}</b>`;
+      $('b-wasm').hidden = nanFrames < 20;
+      if (nanFrames >= 20) instr($('handInstr'), 'Calcul invalide sur ce téléphone', 'Le moteur graphique renvoie des valeurs invalides. Touchez « Changer de moteur » en bas de l\'écran.', 'alert');
+      else if (!sheet.ok && CFG.SHEET.REQUIRED) instr($('handInstr'), ...sheetAdvice(sheet), sheet.reason==='absente' ? '' : 'alert');
       else if (hands.length > 1) instr($('handInstr'),'Une seule main','Retirez l\'autre main du champ.','alert');
       else if (!A) instr($('handInstr'), ...stepIntro(step));
       else if (step.kind === 'quatre' && !c.main) instr($('handInstr'), 'Vérifiez la main présentée', `Posez la main ${side}, dos contre la feuille, paume vers l'objectif.`, 'alert');
@@ -1036,6 +1072,7 @@ $('b-send').onclick = async () => {
   $('b-new').hidden = false;
 };
 $('b-new').onclick = () => location.reload();
+$('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, FINGERS, THUMB, STEPS, handAnalysis, detectSheet, openSession, cropFinger, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
 log('prototype chargé');
