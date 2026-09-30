@@ -153,7 +153,7 @@ details summary{cursor:pointer;font-weight:500}
   </div>
   <div class="chips" id="faceChips"></div>
   <div class="metrics" id="faceMetrics"></div>
-  <div class="cambar"><button class="btn ghost small" id="b-faceCancel">Abandonner</button><span class="spacer"></span><span class="step" id="faceAttempts" style="font:12px var(--mono);color:#9fb3a8"></span></div>
+  <div class="cambar"><button class="btn ghost small" id="b-faceCancel">Abandonner</button><span class="spacer"></span><button class="btn small" id="b-faceShot" hidden style="width:auto">Prendre la photo</button><span class="step" id="faceAttempts" style="font:12px var(--mono);color:#9fb3a8"></span></div>
 </section>
 
 <!-- 3. EMPREINTES -->
@@ -172,6 +172,7 @@ details summary{cursor:pointer;font-weight:500}
     <button class="btn ghost small" id="b-torch" hidden>Torche</button>
     <span class="spacer"></span>
     <button class="btn ghost small" id="b-wasm" hidden>Changer de moteur</button>
+    <button class="btn small" id="b-handShot" hidden style="width:auto">Capturer</button>
     <button class="btn ghost small" id="b-skipHand" hidden>Ignorer cette main</button>
   </div>
 </section>
@@ -231,21 +232,27 @@ const CFG = {
   MAX_ATTEMPTS: 3,             // tentatives par modalité
   FACE: {
     IED_MIN: 90,               // distance inter-pupillaire minimale (px) — ISO/IEC 39794-5 / ICAO
-    POSE_MAX_DEG: 10,          // lacet / tangage / roulis max. pour la photo de référence
-    LUMA_MIN: 70, LUMA_MAX: 205,
-    BALANCE_MIN: 0.6,          // rapport d'éclairage gauche / droite
-    SHARP_MIN: 18,             // variance du laplacien (à calibrer)
-    EYE_OPEN_MIN: 0.28, EYE_CLOSED_MAX: 0.2,
-    TURN_ACTION: 0.35,         // ≈ 20° de rotation
-    TURN_CENTER: 0.15,
-    STABLE_FRAMES: 6,
-    ACTION_TIMEOUT_MS: 8000,
+    ROLL_MAX: 12,              // inclinaison de la tête (°)
+    OFFSET_CENTER: 0.15,       // décalage du nez / IED : en deçà, visage de face
+    OFFSET_ACTION: 0.30,       // au-delà, tête tournée (≈ 20°)
+    MIRRORED_SOURCE: false,    // passer à true si le navigateur livre une image frontale en miroir
+    LUMA_MIN: 50, LUMA_MAX: 220,
+    BALANCE_MIN: 0.45,         // rapport d'éclairage gauche / droite
+    SHARP_MIN: 8,              // variance du laplacien (à calibrer sur le terrain)
+    EYE_OPEN_MIN: 0.12,        // n'écarte que les yeux nettement fermés
+    CLOSED_RATIO: 0.55,        // yeux fermés : ouverture < 55 % de l'ouverture de référence
+    CLOSED_MS: 350,            // … pendant au moins 350 ms
+    WINDOW: 10,                // fenêtre glissante (images)
+    AUTO_RATIO: 0.7,           // capture auto : critères tenus sur 70 % de la fenêtre
+    MANUAL_AFTER_MS: 8000,     // bouton de capture manuelle après 8 s
+    ACTION_TIMEOUT_MS: 12000,
   },
   HAND: {
     DETECT_W: 960,             // largeur de l'image transmise au détecteur
     PPI_TARGET: 500, PPI_MIN: 400, PPI_MAX: 1400,
-    STABLE_FRAMES: 5,
-    MOVE_MAX: 0.012,           // déplacement max. des extrémités entre deux images (fraction de largeur)
+    WINDOW: 8, AUTO_RATIO: 0.7, MANUAL_AFTER_MS: 6000,
+    FILL_MIN: 0.8,             // la feuille doit occuper 80 % du grand côté de l'écran
+    MOVE_MAX: 0.015,           // déplacement max. des extrémités entre deux images (fraction de largeur)
     MIN_GOOD: { quatre: 2, pouce: 1 }, // doigts exploitables requis par prise
   },
   // Feuille de référence posée sous la main. A4 : 210 mm entre les grands bords.
@@ -272,7 +279,7 @@ const STEPS = [
 const ACTIONS = {
   gauche: { titre:'Tournez la tête vers la gauche', aide:'Lentement, puis revenez de face.' },
   droite: { titre:'Tournez la tête vers la droite', aide:'Lentement, puis revenez de face.' },
-  cligner:{ titre:'Clignez des yeux', aide:'Fermez les deux yeux une seconde, puis rouvrez-les.' },
+  fermer: { titre:'Fermez les yeux', aide:'Gardez-les fermés une seconde, puis rouvrez-les.' },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -308,7 +315,7 @@ async function openSession(npi){
   S.server = await crypto.subtle.generateKey({ name:'ECDH', namedCurve:'P-256' }, true, ['deriveBits']);
   // Clé du terminal, non exportable (équivalent Keystore / Secure Enclave)
   S.device = await crypto.subtle.generateKey({ name:'ECDSA', namedCurve:'P-256' }, false, ['sign','verify']);
-  const pool = ['gauche','droite','cligner'];
+  const pool = ['gauche','droite','fermer'];
   const r = rnd(2); const first = pool.splice(r[0] % 3, 1)[0]; const second = pool[r[1] % 2];
   S.session = {
     id: crypto.randomUUID(),
@@ -480,11 +487,29 @@ function eyeOpenness(m){
   const R = Math.abs(m[145][1]-m[159][1]) / Math.max(1,Math.abs(m[223][1]-m[230][1]));
   return { L, R };
 }
+/* Consignes stables : une nouvelle consigne ne remplace l'actuelle que si elle persiste 0,5 s,
+   et une consigne reste affichée au moins 1,2 s. Les changements d'étape passent par force(). */
+function makeAdvisor(el){
+  let cur = null, curT = 0, pend = null, pendT = 0;
+  const apply = (t,d,m) => { instr(el,t,d,m); cur = t+'|'+m; curT = performance.now(); pend = null; };
+  return {
+    set(t, d, m=''){ const key = t+'|'+m, now = performance.now(); if (key === cur) return; if (!cur){ apply(t,d,m); return; }
+      if (key !== pend){ pend = key; pendT = now; return; }
+      if (now - pendT >= 500 && now - curT >= 1200) apply(t,d,m); },
+    force(t, d, m=''){ apply(t,d,m); },
+    get mode(){ return cur ? cur.split('|')[1] : ''; },
+  };
+}
+// Fenêtre glissante : un critère est « tenu » s'il est vrai sur une majorité des dernières images
+class Win { constructor(n){ this.n = n; this.a = []; } push(v){ this.a.push(v ? 1 : 0); if (this.a.length > this.n) this.a.shift(); return this; }
+  get ratio(){ return this.a.length ? this.a.reduce((x,y)=>x+y,0)/this.a.length : 0; } ok(r=0.6){ return this.a.length >= Math.min(this.n,4) && this.ratio >= r; } reset(){ this.a = []; } }
+
 function faceMetrics(res, frameSrc){
   const faces = res.face || [];
   const out = { count: faces.length };
   if (faces.length !== 1 || !faces[0].mesh || faces[0].mesh.length < 468) return out;
   const f = faces[0], m = f.mesh, a = f.annotations || {};
+  if (!m.every(p => Number.isFinite(p[0]) && Number.isFinite(p[1]))) return out;
   const li = a.leftEyeIris?.[0], ri = a.rightEyeIris?.[0];
   const eL = li || m[263], eR = ri || m[33];
   out.eyeL = eL; out.eyeR = eR;
@@ -492,9 +517,12 @@ function faceMetrics(res, frameSrc){
   const ang = f.rotation?.angle || { yaw:0, pitch:0, roll:0 };
   out.yaw = ang.yaw*180/Math.PI; out.pitch = ang.pitch*180/Math.PI;
   out.roll = Math.atan2(eL[1]-eR[1], eL[0]-eR[0]) * 180/Math.PI;
-  const xDiff = Math.abs(m[33][0]-m[263][0]) || 1; out.turn = ((m[33][2]||0) - (m[263][2]||0)) / xDiff;
+  // Rotation de la tête mesurée en 2D : décalage du bout du nez par rapport au milieu des yeux, en IED.
+  // Image frontale brute (non miroir) : tête tournée vers SA gauche ⇒ nez vers la droite de l'image ⇒ offset > 0.
+  const mid = [(eL[0]+eR[0])/2, (eL[1]+eR[1])/2];
+  out.offset = (m[1][0] - mid[0]) / Math.max(1, out.ied) * (CFG.FACE.MIRRORED_SOURCE ? -1 : 1);
   const eo = eyeOpenness(m); out.eyes = Math.min(eo.L, eo.R);
-  const [bx,by,bw,bh] = f.box; out.box = f.box;
+  const [bx,by,bw,bh] = f.box; out.box = f.box; out.bw = bw;
   const reg = grayRegion(frameSrc, bx+bw*0.15, by+bh*0.15, bw*0.7, bh*0.7, 160);
   const st = stats(reg.g); out.luma = st.mean; out.sharp = laplacianVar(reg);
   const lh = grayRegion(frameSrc, bx+bw*0.1, by+bh*0.3, bw*0.35, bh*0.4, 60), rh = grayRegion(frameSrc, bx+bw*0.55, by+bh*0.3, bw*0.35, bh*0.4, 60);
@@ -507,9 +535,9 @@ function faceChecks(M){
   const F = CFG.FACE;
   const c = {
     unique: M.count===1,
-    distance: M.ied >= F.IED_MIN && M.hRatio < 0.85,
-    centre: M.cx>0.3 && M.cx<0.7 && M.cy>0.25 && M.cy<0.7,
-    pose: Math.abs(M.yaw)<=F.POSE_MAX_DEG && Math.abs(M.pitch)<=F.POSE_MAX_DEG+5 && Math.abs(M.roll)<=F.POSE_MAX_DEG && Math.abs(M.turn)<F.TURN_CENTER,
+    distance: M.ied >= F.IED_MIN && M.hRatio < 0.9,
+    centre: M.cx>0.25 && M.cx<0.75 && M.cy>0.2 && M.cy<0.75,
+    pose: Math.abs(M.offset) < F.OFFSET_CENTER && Math.abs(M.roll) <= F.ROLL_MAX,
     lumiere: M.luma>=F.LUMA_MIN && M.luma<=F.LUMA_MAX && M.balance>=F.BALANCE_MIN,
     nettete: M.sharp>=F.SHARP_MIN,
     yeux: M.eyes>=F.EYE_OPEN_MIN,
@@ -518,15 +546,15 @@ function faceChecks(M){
   return c;
 }
 function faceAdvice(M, c){
-  if (M.count===0) return ['Aucun visage détecté','Placez votre visage dans l\'ovale.'];
-  if (M.count>1) return ['Plusieurs visages','Une seule personne doit être dans le champ.','alert'];
-  if (!M.ied) return ['Visage partiel','Dégagez le visage entier.'];
-  if (M.ied < CFG.FACE.IED_MIN) return ['Rapprochez-vous','Le visage est trop petit pour une comparaison fiable.'];
-  if (M.hRatio >= 0.85) return ['Éloignez-vous légèrement','Le visage doit tenir entièrement dans l\'ovale.'];
+  if (M.count===0) return ['Placez votre visage dans l\'ovale','Tenez le téléphone à hauteur des yeux.'];
+  if (M.count>1) return ['Une seule personne','Une seule personne doit être dans le champ.','alert'];
+  if (!M.ied) return ['Dégagez le visage','Le visage entier doit être visible.'];
+  if (M.ied < CFG.FACE.IED_MIN) return ['Rapprochez-vous','Le visage doit remplir l\'ovale.'];
+  if (M.hRatio >= 0.9) return ['Éloignez-vous un peu','Le visage doit tenir dans l\'ovale.'];
   if (!c.centre) return ['Centrez votre visage','Alignez-le dans l\'ovale.'];
-  if (!c.lumiere) return [M.luma<CFG.FACE.LUMA_MIN?'Trop sombre':(M.luma>CFG.FACE.LUMA_MAX?'Trop de lumière':'Éclairage inégal'),'Faites face à une source de lumière douce.'];
+  if (!c.lumiere) return [M.luma<CFG.FACE.LUMA_MIN?'Trop sombre':(M.luma>CFG.FACE.LUMA_MAX?'Trop de lumière':'Éclairage inégal'),'Placez-vous face à une fenêtre ou une lampe.'];
   if (!c.pose) return ['Regardez l\'objectif','Tête droite, de face.'];
-  if (!c.yeux) return ['Ouvrez les yeux','Regardez l\'objectif.'];
+  if (!c.yeux) return ['Ouvrez bien les yeux','Regardez l\'objectif.'];
   if (!c.nettete) return ['Image floue','Tenez le téléphone immobile.'];
   return ['Ne bougez plus','Capture en cours…','good'];
 }
@@ -542,7 +570,7 @@ function faceToken(src, eL, eR){
 function smallFrame(src, w=480){ const k = w/src.width; const c = newCanvas(w, src.height*k); c.getContext('2d').drawImage(src,0,0,c.width,c.height); return c; }
 
 function drawFaceOverlay(canvas, video, M, state){
-  const { ctx, cw, ch, P, s } = fitCover(canvas, video.videoWidth, video.videoHeight);
+  const { ctx, cw, ch, P } = fitCover(canvas, video.videoWidth, video.videoHeight);
   const rx = Math.min(cw*0.36, ch*0.26), ry = rx*1.32, cx=cw/2, cy=ch*0.46;
   ctx.fillStyle='rgba(6,10,8,.55)'; ctx.beginPath(); ctx.rect(0,0,cw,ch); ctx.ellipse(cx,cy,rx,ry,0,0,Math.PI*2); ctx.fill('evenodd');
   ctx.lineWidth=3; ctx.strokeStyle = state==='good' ? '#3fd08a' : (state==='alert' ? '#ff6b5e' : 'rgba(255,255,255,.75)');
@@ -553,19 +581,27 @@ function setProgress(el, n, done, cur){ el.innerHTML = Array.from({length:n},(_,
 
 async function runFace(){
   show('s-visage');
-  const video = $('vFace'), ov = $('oFace');
+  const video = $('vFace'), ov = $('oFace'), adv = makeAdvisor($('faceInstr'));
   $('faceAttempts').textContent = `tentative ${S.face.attempts+1}/${CFG.MAX_ATTEMPTS}`;
   const steps = 1 + S.session.challenge.length;
   setProgress($('faceProgress'), steps, 0, 0);
-  try { await openCamera(video, 'user', 1280, 720); } catch(e){ instr($('faceInstr'),'Caméra indisponible', e.name, 'alert'); return; }
+  $('b-faceShot').hidden = true;
+  try { await openCamera(video, 'user', 1920, 1080); } catch(e){ adv.force('Caméra indisponible', e.name, 'alert'); return false; }
   const H = await getHuman();
   $('faceLoading').hidden = true;
-  log(`caméra frontale ${video.videoWidth}×${video.videoHeight} — ${S.streams.at(-1).getVideoTracks()[0].label}`);
+  log(`caméra frontale ${video.videoWidth}×${video.videoHeight} — ${S.streams.at(-1).getVideoTracks()[0].label} — moteur ${BACKEND}`);
 
-  let phase = 'ref', stable = 0, idx = 0, actionStart = 0, sawClosed = false, needCenter = false, lastIed = 0, lost = 0;
-  const challengeFrames = []; let reference = null;
   const F = CFG.FACE;
+  const W = { unique:new Win(F.WINDOW), distance:new Win(F.WINDOW), pose:new Win(F.WINDOW), lumiere:new Win(F.WINDOW), nettete:new Win(F.WINDOW), yeux:new Win(F.WINDOW), all:new Win(F.WINDOW) };
+  // Meilleures images vues : conforme (capture automatique) et toutes confondues (capture manuelle)
+  const bestOk = { canvas: newCanvas(2,2), score: -1, M: null }, bestAny = { canvas: newCanvas(2,2), score: -1, M: null };
+  const keepBest = (slot, frame, M, score) => { if (score <= slot.score) return; slot.canvas.width = frame.width; slot.canvas.height = frame.height; slot.canvas.getContext('2d').drawImage(frame,0,0); slot.score = score; slot.M = { ...M }; };
+  const eyeBase = [];
+  let phase = 'ref', idx = 0, actionStart = 0, closedSince = 0, sawClosed = false, needCenter = false, lastBw = 0, lost = 0, wrongSince = 0, manual = false;
+  const t0ref = performance.now();
+  const challengeFrames = []; let reference = null;
   const fail = (why) => { S.face.attempts++; log(`visage : échec de la tentative — ${why}`); stopStreams(); return why; };
+  $('b-faceShot').onclick = () => { manual = true; };
 
   const result = await new Promise((resolve) => {
     const loop = async () => {
@@ -578,55 +614,71 @@ async function runFace(){
       const frame = frameOf(video);
       const M = faceMetrics(res, frame);
       const c = M.ied ? faceChecks(M) : { unique: M.count===1 };
+      for (const k of Object.keys(W)) W[k].push(!!c[k]);
       if (typeof M.real === 'number') S.face.pad.real.push(M.real);
       if (typeof M.live === 'number') S.face.pad.live.push(M.live);
-      chips($('faceChips'), [
-        ['visage unique', c.unique?'ok':'ko'], ['distance', c.distance?'ok':'ko'], ['de face', c.pose?'ok':'warn'],
-        ['éclairage', c.lumiere?'ok':'ko'], ['netteté', c.nettete?'ok':'warn'], ['yeux ouverts', c.yeux?'ok':'warn'] ]);
-      $('faceMetrics').innerHTML = M.ied ? `IED <b>${M.ied.toFixed(0)} px</b> lacet <b>${M.yaw.toFixed(0)}°</b> roulis <b>${M.roll.toFixed(0)}°</b> luma <b>${M.luma.toFixed(0)}</b> netteté <b>${M.sharp.toFixed(0)}</b> PAD <b>${(M.real??0).toFixed(2)}/${(M.live??0).toFixed(2)}</b>` : '';
+      const ck = (k, bad='warn') => W[k].ok(0.5) ? 'ok' : bad;
+      chips($('faceChips'), [['visage unique', ck('unique','ko')], ['distance', ck('distance','ko')], ['de face', ck('pose')], ['éclairage', ck('lumiere','ko')], ['netteté', ck('nettete')], ['yeux ouverts', ck('yeux')]]);
+      $('faceMetrics').innerHTML = M.ied ? `IED <b>${M.ied.toFixed(0)} px</b> rotation <b>${M.offset.toFixed(2)}</b> roulis <b>${M.roll.toFixed(0)}°</b> luma <b>${M.luma.toFixed(0)}</b> netteté <b>${M.sharp.toFixed(0)}</b> yeux <b>${M.eyes.toFixed(2)}</b> PAD <b>${(M.real??0).toFixed(2)}/${(M.live??0).toFixed(2)}</b> ${BACKEND}` : `moteur <b>${BACKEND}</b>`;
 
-      // Continuité : le même visage doit rester dans le champ pendant tout le défi
       if (phase !== 'ref'){
-        if (M.count !== 1){ if (++lost > 20) return resolve(fail('visage perdu pendant le défi')); }
-        else { lost = 0; if (lastIed && Math.abs(M.ied-lastIed)/lastIed > 0.35) return resolve(fail('rupture de continuité du visage')); lastIed = M.ied; }
+        if (M.count !== 1){ if (++lost > 40) return resolve(fail('visage perdu pendant le défi')); }
+        else { lost = 0; if (lastBw && Math.abs(M.bw-lastBw)/lastBw > 0.6) return resolve(fail('rupture de continuité du visage')); lastBw = M.bw; }
       }
 
       if (phase === 'ref'){
-        const [t,d,mode] = faceAdvice(M, c); instr($('faceInstr'), t, d, mode);
-        drawFaceOverlay(ov, video, M, mode);
-        stable = c.all ? stable+1 : 0;
-        if (stable >= F.STABLE_FRAMES){
-          reference = { frame: keepCopy(frame), M: { ...M } };
-          log(`photo de référence — IED ${M.ied.toFixed(0)} px, netteté ${M.sharp.toFixed(0)}, luma ${M.luma.toFixed(0)}`);
-          phase = 'action'; idx = 0; actionStart = performance.now(); lastIed = M.ied; sawClosed = false; needCenter = false;
+        const [t,d,mode] = faceAdvice(M, c);
+        adv.set(t, d, mode);
+        drawFaceOverlay(ov, video, M, adv.mode);
+        if (M.ied){
+          if (c.all){ keepBest(bestOk, frame, M, M.sharp); if (eyeBase.length < 60) eyeBase.push(M.eyes); }
+          const partial = ['distance','pose','lumiere','nettete','yeux'].filter(k => c[k]).length;
+          keepBest(bestAny, frame, M, partial*1000 + M.sharp);
+        }
+        if (performance.now() - t0ref > F.MANUAL_AFTER_MS && bestAny.M) $('b-faceShot').hidden = false;
+        const auto = W.all.ok(F.AUTO_RATIO) && bestOk.M;
+        if (auto || (manual && bestAny.M)){
+          const slot = auto ? bestOk : (bestOk.M ? bestOk : bestAny);
+          reference = { frame: keepCopy(slot.canvas), M: slot.M, mode: auto ? 'automatique' : 'manuelle' };
+          if (!eyeBase.length) eyeBase.push(slot.M.eyes);
+          log(`photo de référence (${reference.mode}) — IED ${slot.M.ied.toFixed(0)} px, netteté ${slot.M.sharp.toFixed(0)}, luma ${slot.M.luma.toFixed(0)}`);
+          $('b-faceShot').hidden = true;
+          phase = 'action'; idx = 0; actionStart = performance.now(); lastBw = M.bw || slot.M.bw; sawClosed = false; needCenter = false; closedSince = 0;
           setProgress($('faceProgress'), steps, 1, 1);
+          const A0 = ACTIONS[S.session.challenge[0]]; adv.force(A0.titre, A0.aide);
         }
       } else if (phase === 'action'){
+        const base = eyeBase.slice().sort((a,b)=>a-b)[eyeBase.length>>1] || 0.3;
         const act = S.session.challenge[idx]; const A = ACTIONS[act];
         drawFaceOverlay(ov, video, M, '');
         if (needCenter){
-          instr($('faceInstr'), 'Revenez de face', 'Regardez à nouveau l\'objectif.');
-          if (M.ied && Math.abs(M.turn) < F.TURN_CENTER && M.eyes >= F.EYE_OPEN_MIN){ needCenter = false; idx++; actionStart = performance.now(); sawClosed = false;
+          if (M.ied && Math.abs(M.offset) < F.OFFSET_CENTER && M.eyes >= base*0.75){
+            needCenter = false; idx++; actionStart = performance.now(); sawClosed = false; closedSince = 0; wrongSince = 0;
             if (idx >= S.session.challenge.length){ stopStreams(); return resolve({ ok:true }); }
             setProgress($('faceProgress'), steps, 1+idx, 1+idx);
+            const An = ACTIONS[S.session.challenge[idx]]; adv.force(An.titre, An.aide);
           }
         } else {
-          instr($('faceInstr'), A.titre, A.aide);
           const elapsed = performance.now() - actionStart;
           if (elapsed > F.ACTION_TIMEOUT_MS) return resolve(fail(`mouvement « ${act} » non réalisé dans le délai`));
           let done = false;
           if (M.ied){
-            if (act === 'gauche' && M.turn < -F.TURN_ACTION) done = true;
-            if (act === 'droite' && M.turn >  F.TURN_ACTION) done = true;
-            if (act === 'cligner'){ if (M.eyes < F.EYE_CLOSED_MAX) sawClosed = true; else if (sawClosed && M.eyes >= F.EYE_OPEN_MIN) done = true; }
-            // mouvement opposé à celui demandé : indice de rejeu d'une vidéo préenregistrée
-            if ((act === 'gauche' && M.turn > F.TURN_ACTION) || (act === 'droite' && M.turn < -F.TURN_ACTION)) return resolve(fail(`mouvement contraire au défi « ${act} »`));
+            if (act === 'gauche' && M.offset >  F.OFFSET_ACTION) done = true;
+            if (act === 'droite' && M.offset < -F.OFFSET_ACTION) done = true;
+            if (act === 'fermer'){
+              if (M.eyes < base*F.CLOSED_RATIO){ closedSince ||= performance.now(); if (performance.now()-closedSince >= F.CLOSED_MS) sawClosed = true; }
+              else { if (sawClosed && M.eyes >= base*0.75) done = true; closedSince = 0; }
+            }
+            // Mouvement dans le mauvais sens : on l'indique, sans faire échouer la tentative
+            const wrong = (act === 'gauche' && M.offset < -F.OFFSET_ACTION) || (act === 'droite' && M.offset > F.OFFSET_ACTION);
+            if (wrong){ wrongSince ||= performance.now(); if (performance.now()-wrongSince > 700) adv.set('Dans l\'autre sens', A.titre + '.', 'alert'); }
+            else if (wrongSince){ wrongSince = 0; adv.force(A.titre, A.aide); }
           }
           if (done){
-            challengeFrames.push({ action: act, t_ms: Math.round(elapsed), frame: smallFrame(frame), turn: +M.turn.toFixed(3), eyes: +M.eyes.toFixed(3) });
+            challengeFrames.push({ action: act, t_ms: Math.round(elapsed), frame: smallFrame(frame), offset: +M.offset.toFixed(3), eyes: +M.eyes.toFixed(3) });
             log(`défi « ${act} » réalisé en ${Math.round(elapsed)} ms`);
             setProgress($('faceProgress'), steps, 2+idx, -1);
-            needCenter = true;
+            needCenter = true; adv.force('Revenez de face', 'Regardez à nouveau l\'objectif, yeux ouverts.');
           }
         }
       }
@@ -638,19 +690,19 @@ async function runFace(){
   if (result?.ok){
     const tok = faceToken(reference.frame, reference.M.eyeL, reference.M.eyeR);
     const mean = (a) => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
-    S.face.reference = { token: tok, metrics: reference.M };
+    S.face.reference = { token: tok, metrics: reference.M, mode: reference.mode };
     S.face.challenge = challengeFrames;
     S.face.padSummary = { real: mean(S.face.pad.real), live: mean(S.face.pad.live), frames: S.face.pad.real.length };
     log(`visage terminé — PAD passif indicatif real=${S.face.padSummary.real?.toFixed(2)} live=${S.face.padSummary.live?.toFixed(2)}`);
     return true;
   }
   if (S.face.attempts >= CFG.MAX_ATTEMPTS){
-    instr($('faceInstr'), 'Authentification impossible en ligne', 'Nombre maximal de tentatives atteint. Adressez-vous à la mission diplomatique.', 'alert');
+    adv.force('Authentification impossible en ligne', 'Nombre maximal de tentatives atteint. Adressez-vous à la mission diplomatique.', 'alert');
     log('visage : tentatives épuisées → orientation vers la mission diplomatique');
     return false;
   }
-  instr($('faceInstr'), 'Nouvelle tentative', result + '. Reprise dans 2 secondes.', 'alert');
-  await new Promise(r=>setTimeout(r,2000));
+  adv.force('Nouvelle tentative', result + '. Reprise dans 3 secondes.', 'alert');
+  await new Promise(r=>setTimeout(r,3000));
   return runFace();
 }
 
@@ -811,80 +863,134 @@ function stepIntro(step){
     ? [`${step.label}, dos contre la feuille`, 'Paume vers l\'objectif, quatre doigts à plat, tendus et serrés. Tenez le téléphone à plat, de l\'autre main.']
     : [`${step.label}, ongle contre la feuille`, 'Repliez les autres doigts, pouce à plat pointé vers le haut de l\'écran, pulpe vers l\'objectif.'];
 }
+function rotate90(src, dir){
+  const c = newCanvas(src.height, src.width); const ctx = c.getContext('2d');
+  if (dir > 0){ ctx.translate(c.width, 0); ctx.rotate(Math.PI/2); } else { ctx.translate(0, c.height); ctx.rotate(-Math.PI/2); }
+  ctx.drawImage(src, 0, 0); return c;
+}
+const finiteHand = (h) => h.keypoints?.length === 21 && h.keypoints.every(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+// Analyse d'une image fixe : main, points de repère et feuille, recalculés sur l'image elle-même
+async function analyzeImage(img, step){
+  const H = await getHuman();
+  const k = Math.min(1, CFG.HAND.DETECT_W / Math.min(img.width, img.height));
+  const det = document.createElement('canvas'); det.width = Math.round(img.width*k); det.height = Math.round(img.height*k);
+  det.getContext('2d').drawImage(img, 0, 0, det.width, det.height);
+  const res = await H.detect(det, { face:{ enabled:false }, hand:{ enabled:true } });
+  const hands = (res.hand || []).filter(h => h.score > 0.5 && finiteHand(h)).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
+  const sheet = detectSheet(det);
+  const out = { hands, sheet, k };
+  if (hands.length >= 1){ out.kp = hands[0].keypoints; out.A = handAnalysis(hands[0], img.width, step); }
+  if (sheet.ok) out.ppiSheet = (sheet.sepPx / k) / sheet.mm * 25.4;
+  return out;
+}
+// Photo pleine résolution (ImageCapture, Chrome Android) ; sinon image de la vidéo
+async function captureStill(video, step, preview){
+  const track = S.streams.at(-1)?.getVideoTracks()[0];
+  let img = null, source = 'vidéo', an = null;
+  if (window.ImageCapture && track){
+    try {
+      const blob = await new ImageCapture(track).takePhoto();
+      const bmp = await createImageBitmap(blob, { imageOrientation:'from-image' });
+      img = newCanvas(bmp.width, bmp.height); img.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.();
+      source = 'photo';
+      // la photo peut sortir dans l'orientation du capteur : on la remet dans le sens de l'aperçu
+      if ((img.width > img.height) !== (video.videoWidth > video.videoHeight)){
+        let found = null;
+        for (const dir of [1, -1]){ const r = rotate90(img, dir); const a = await analyzeImage(r, step); if (a.A?.upright){ found = { r, a }; break; } if (!found && a.A) found = { r, a }; }
+        if (found){ img = found.r; an = found.a; } else img = rotate90(img, 1);
+      }
+      an ||= await analyzeImage(img, step);
+      if (!an.A){ log('photo : main non retrouvée, repli sur l\'image vidéo'); img = null; an = null; }
+    } catch(e){ log('photo pleine résolution impossible : ' + (e.message || e.name)); img = null; }
+  }
+  if (!img){ img = frameOf(video, true); source = 'vidéo'; an = { kp: preview.kp, A: preview.A, sheet: preview.sheet, ppiSheet: preview.ppiSheet }; }
+  const scale = an.ppiSheet ? 'feuille' : 'phalange';
+  const ppi = an.ppiSheet || an.A.ppi;
+  const fingers = step.fingers.map(f => {
+    const crop = cropFinger(img, an.kp, f, an.A.width, ppi);
+    return { finger: f, code: f.code[step.side], crop: toGray(crop), enhanced: ridgeEnhance(crop), q: fingerQuality(crop) };
+  });
+  const good = fingers.filter(x=>x.q.exploitable).length;
+  const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push('résolution insuffisante'); if (scale === 'phalange') flags.push('échelle estimée');
+  log(`${step.label.toLowerCase()} : ${source} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (${scale}), ${good}/${fingers.length} exploitable(s) (${fingers.map(x=>x.q.score).join('/')})${flags.length ? ' — ' + flags.join(', ') : ''}`);
+  return { fingers, ppi, ppiPhalange: an.A.ppi, scale, source, flags, good, frameSize:[img.width, img.height], sheet: an.sheet?.use ? { angle: +an.sheet.angle.toFixed(2), parallelisme: +an.sheet.parallel.toFixed(3) } : null };
+}
+
 async function captureHand(step){
-  const video = $('vHand'), ov = $('oHand');
-  const side = step.side, n = step.fingers.length;
+  const video = $('vHand'), ov = $('oHand'), adv = makeAdvisor($('handInstr'));
+  const side = step.side;
   $('handStep').textContent = `${step.label.toLowerCase()} · tentative ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
-  instr($('handInstr'), ...stepIntro(step));
+  adv.force(...stepIntro(step));
+  $('b-handShot').hidden = true;
   const H = await getHuman();
   const det = document.createElement('canvas');
-  let stable = 0, prevTips = null, nanFrames = 0;
-  const HC = CFG.HAND;
+  const HC = CFG.HAND, N = HC.WINDOW;
+  const W = { feuille:new Win(N), proche:new Win(N), presence:new Win(N), main:new Win(N), doigts:new Win(N), stable:new Win(N), all:new Win(N) };
+  let prevTips = null, nanFrames = 0, manual = false, last = null;
+  const tStart = performance.now();
   return new Promise((resolve) => {
     let skip = false; $('b-skipHand').onclick = () => { skip = true; };
+    $('b-handShot').onclick = () => { manual = true; };
     const loop = async () => {
       if (!S.streams.length) return resolve(null);
       if (skip) return resolve({ skipped:true });
       if (sessionLeft() === 0) return resolve({ error:'session expirée' });
-      const vw = video.videoWidth, vh = video.videoHeight; const k = Math.min(1, HC.DETECT_W / vw);
+      const vw = video.videoWidth, vh = video.videoHeight; const k = Math.min(1, HC.DETECT_W / Math.min(vw, vh));
       det.width = Math.round(vw*k); det.height = Math.round(vh*k); det.getContext('2d').drawImage(video,0,0,det.width,det.height);
       let res;
       try { res = await H.detect(det, { face:{ enabled:false }, hand:{ enabled:true } }); }
       catch(e){ return resolve({ error:'moteur de détection : '+e.message }); }
       const raw = (res.hand || []).filter(h => h.score > 0.5);
-      const finite = (h) => h.keypoints?.length === 21 && h.keypoints.every(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
-      if (raw.length && !raw.some(finite)){ if (++nanFrames === 20) log(`points de la main invalides (NaN) sur le moteur ${BACKEND}`); } else nanFrames = 0;
-      const hands = raw.filter(finite).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
+      if (raw.length && !raw.some(finiteHand)){ if (++nanFrames === 20) log(`points de la main invalides (NaN) sur le moteur ${BACKEND}`); } else nanFrames = 0;
+      const hands = raw.filter(finiteHand).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
       const sheet = detectSheet(det);
       const ppiSheet = sheet.ok ? (sheet.sepPx / k) / sheet.mm * 25.4 : null;
-      let A = null, c = {};
-      if (hands.length === 1){ A = handAnalysis(hands[0], vw, step); A.ppiPhalange = A.ppi; if (ppiSheet) A.ppi = ppiSheet; }
-      c.feuille = sheet.ok || !CFG.SHEET.REQUIRED;
-      c.presence = hands.length === 1;
-      c.main = A ? A.thumbSide === side : false;
-      c.doigts = A ? A.extended && A.upright : false;
-      c.resolution = A ? A.ppi >= HC.PPI_MIN && A.ppi <= HC.PPI_MAX : false;
-      c.coherence = A && ppiSheet ? (A.ppiPhalange/ppiSheet > 0.7 && A.ppiPhalange/ppiSheet < 1.4) : false;
+      const fill = sheet.use ? sheet.sepPx / sheet.use.U : 0;   // part du grand côté de l'écran occupée par la feuille
+      let A = null;
+      if (hands.length === 1){ A = handAnalysis(hands[0], vw, step); last = { kp: hands[0].keypoints, A, sheet, ppiSheet }; }
       let moved = 1;
       if (A && prevTips){ moved = Math.max(...A.tips.map((p,i)=>dist(p,prevTips[i])))/vw; }
       prevTips = A ? A.tips : null;
-      c.stable = moved < HC.MOVE_MAX;
-      // Quatre doigts : la bonne main est exigée. Pouce : la position du poing rend ce contrôle indicatif.
-      const all = c.feuille && c.presence && (step.kind === 'pouce' || c.main) && c.doigts && c.resolution && c.stable;
-      stable = all ? stable+1 : 0;
-      const ppiChip = [`${A?Math.round(A.ppi):'—'} ppi`, !A?'':(A.ppi>=HC.PPI_TARGET?'ok':(c.resolution?'warn':'ko'))];
-      const sheetChip = [`feuille ${CFG.SHEET.LABEL}`, sheet.ok?'ok':'ko'];
-      chips($('handChips'), step.kind === 'quatre'
-        ? [sheetChip, ['une main', c.presence?'ok':'ko'], [`main ${side} · paume`, c.main?'ok':'ko'], ['doigts tendus', c.doigts?'ok':'warn'], ppiChip, ['échelle cohérente', c.coherence?'ok':'warn'], ['stable', c.stable?'ok':'warn']]
-        : [sheetChip, ['une main', c.presence?'ok':'ko'], ['pouce tendu', c.doigts?'ok':'warn'], ['autres doigts repliés', A?.folded?'ok':'warn'], ppiChip, ['stable', c.stable?'ok':'warn']]);
+      const c = {
+        feuille: sheet.ok || !CFG.SHEET.REQUIRED,
+        proche: sheet.ok && fill >= HC.FILL_MIN,
+        presence: hands.length === 1,
+        main: !!A && (step.kind === 'pouce' || A.thumbSide === side),
+        doigts: !!A && A.extended && A.upright,
+        stable: moved < HC.MOVE_MAX,
+      };
+      c.all = c.feuille && c.proche && c.presence && c.doigts && c.stable;   // la main (droite/gauche) reste indicative
+      for (const key of Object.keys(W)) W[key].push(c[key]);
+      const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
+      const ppiNow = A ? (ppiSheet || A.ppi) : null;
+      chips($('handChips'), [
+        [`feuille ${CFG.SHEET.LABEL}`, ck('feuille','ko')], ['assez près', ck('proche')], ['une main', ck('presence','ko')],
+        step.kind === 'quatre' ? [`main ${side}`, ck('main')] : ['autres doigts repliés', A?.folded ? 'ok' : 'warn'],
+        [step.kind === 'quatre' ? 'doigts tendus' : 'pouce tendu', ck('doigts')], ['stable', ck('stable')] ]);
       const pct = (x) => Math.round(x*100);
-      $('handMetrics').innerHTML = `feuille <b>${REASON_FR[sheet.reason]}</b> seuil <b>${sheet.thr}</b> blanc <b>${pct(sheet.whiteShare)} %</b> bords <b>${pct(sheet.long.coverage)}/${pct(sheet.short.coverage)} %</b> `
-        + (sheet.use ? `inclinaison <b>${sheet.angle.toFixed(1)}°</b> parallélisme <b>${sheet.parallel.toFixed(3)}</b> ` : '')
-        + (A ? `résolution <b>${Math.round(A.ppi)} ppi</b> (phalange <b>${Math.round(A.ppiPhalange)}</b>) ` : '')
-        + `vidéo <b>${vw}×${vh}</b> moteur <b>${BACKEND}</b> torche <b>${torchOn?'oui':'non'}</b>`;
+      $('handMetrics').innerHTML = `feuille <b>${REASON_FR[sheet.reason]}</b> remplissage <b>${pct(fill)} %</b> seuil <b>${sheet.thr}</b> blanc <b>${pct(sheet.whiteShare)} %</b> `
+        + (sheet.use ? `inclinaison <b>${sheet.angle.toFixed(1)}°</b> parallélisme <b>${sheet.parallel.toFixed(2)}</b> ` : '')
+        + (ppiNow ? `aperçu <b>${Math.round(ppiNow)} ppi</b> ` : '') + `vidéo <b>${vw}×${vh}</b> moteur <b>${BACKEND}</b>`;
       $('b-wasm').hidden = nanFrames < 20;
-      if (nanFrames >= 20) instr($('handInstr'), 'Calcul invalide sur ce téléphone', 'Le moteur graphique renvoie des valeurs invalides. Touchez « Changer de moteur » en bas de l\'écran.', 'alert');
-      else if (!sheet.ok && CFG.SHEET.REQUIRED) instr($('handInstr'), ...sheetAdvice(sheet), sheet.reason==='absente' ? '' : 'alert');
-      else if (hands.length > 1) instr($('handInstr'),'Une seule main','Retirez l\'autre main du champ.','alert');
-      else if (!A) instr($('handInstr'), ...stepIntro(step));
-      else if (step.kind === 'quatre' && !c.main) instr($('handInstr'), 'Vérifiez la main présentée', `Posez la main ${side}, dos contre la feuille, paume vers l'objectif.`, 'alert');
-      else if (!c.doigts) step.kind === 'quatre' ? instr($('handInstr'), 'Tendez les doigts', 'Doigts à plat, droits, serrés, pointés vers le haut de l\'écran.') : instr($('handInstr'), 'Tendez le pouce', 'Pouce à plat, ongle contre la feuille, pointé vers le haut de l\'écran.');
-      else if (A.ppi < HC.PPI_MIN) instr($('handInstr'), 'Rapprochez le téléphone', 'Les deux grands bords de la feuille doivent rester visibles, au plus près.');
-      else if (A.ppi > HC.PPI_MAX) instr($('handInstr'), 'Éloignez le téléphone', 'Trop près : la mise au point devient impossible.');
-      else if (!c.stable) instr($('handInstr'), 'Ne bougez plus', 'Laissez la main posée, immobile.');
-      else instr($('handInstr'), 'Ne bougez plus', 'Capture en cours…', 'good');
-      drawHandOverlay(ov, video, hands, A, all, step.fingers, sheet, k);
+      if (last && performance.now() - tStart > HC.MANUAL_AFTER_MS) $('b-handShot').hidden = false;
 
-      if (stable >= HC.STABLE_FRAMES){
-        const frame = frameOf(video, true);
-        const kp = hands[0].keypoints;
-        const fingers = step.fingers.map(f => {
-          const crop = cropFinger(frame, kp, f, A.width, A.ppi);
-          return { finger: f, code: f.code[side], crop: toGray(crop), enhanced: ridgeEnhance(crop), q: fingerQuality(crop) };
-        });
-        const good = fingers.filter(x=>x.q.exploitable).length;
-        log(`${step.label.toLowerCase()} : capture ${vw}×${vh}, ${Math.round(A.ppi)} ppi mesurés sur la feuille (phalange ${Math.round(A.ppiPhalange)}), ${good}/${n} exploitable(s) (${fingers.map(x=>x.q.score).join('/')})`);
-        return resolve({ fingers, ppi: A.ppi, ppiPhalange: A.ppiPhalange, sheet: { angle: +sheet.angle.toFixed(2), parallelisme: +sheet.parallel.toFixed(3) }, good, frameSize:[vw,vh] });
+      if (nanFrames >= 20) adv.set('Calcul invalide sur ce téléphone', 'Touchez « Changer de moteur » en bas de l\'écran.', 'alert');
+      else if (!W.feuille.ok(0.5) && CFG.SHEET.REQUIRED) adv.set(...sheetAdvice(sheet), sheet.reason === 'absente' ? '' : 'alert');
+      else if (!W.proche.ok(0.5)) adv.set('Rapprochez le téléphone', `La feuille doit occuper presque toute la ${sheet.portrait ? 'hauteur' : 'largeur'} de l'écran, ses deux grands bords restant visibles.`);
+      else if (hands.length > 1) adv.set('Une seule main', 'Retirez l\'autre main du champ.', 'alert');
+      else if (!W.presence.ok(0.5)) adv.set(...stepIntro(step));
+      else if (!W.doigts.ok(0.5)) step.kind === 'quatre' ? adv.set('Tendez les doigts', 'Doigts à plat, droits, serrés, pointés vers le haut de l\'écran.') : adv.set('Tendez le pouce', 'Pouce à plat, ongle contre la feuille, pointé vers le haut de l\'écran.');
+      else if (step.kind === 'quatre' && !W.main.ok(0.5)) adv.set('Vérifiez la main', `Main ${side}, dos contre la feuille, paume vers l'objectif.`, 'alert');
+      else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Laissez la main posée, immobile.');
+      else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
+      drawHandOverlay(ov, video, hands, A, W.all.ok(HC.AUTO_RATIO), step.fingers, sheet, k);
+
+      if ((W.all.ok(HC.AUTO_RATIO) && A) || (manual && last)){
+        const mode = manual && !W.all.ok(HC.AUTO_RATIO) ? 'manuelle' : 'automatique';
+        adv.force('Capture en cours…', 'Ne bougez pas, la photo est prise en pleine résolution.', 'good');
+        $('b-handShot').hidden = true;
+        try { const r = await captureStill(video, step, A ? { kp: hands[0].keypoints, A, sheet, ppiSheet } : last); r.mode = mode; return resolve(r); }
+        catch(e){ log('capture impossible : ' + e.message); manual = false; W.all.reset(); }
       }
       requestAnimationFrame(loop);
     };
@@ -895,13 +1001,13 @@ async function runFingers(){
   show('s-doigts');
   const video = $('vHand');
   const facing = S.env.rear?.present ? 'environment' : 'user';
-  try { await openCamera(video, facing, 3840, 2160); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
+  try { await openCamera(video, facing, 1920, 1080); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
   $('handLoading').hidden = true;
   const stream = S.streams.at(-1);
   const tcap = stream.getVideoTracks()[0].getCapabilities?.() || {};
   if (tcap.torch){ $('b-torch').hidden = false; await setTorch(stream, true); $('b-torch').onclick = () => setTorch(stream, !torchOn); }
   if (Array.isArray(tcap.focusMode) && tcap.focusMode.includes('continuous')){ try { await stream.getVideoTracks()[0].applyConstraints({ advanced:[{ focusMode:'continuous' }] }); } catch {} }
-  log(`caméra ${facing==='environment'?'arrière':'frontale (démonstration)'} ${video.videoWidth}×${video.videoHeight}, torche ${torchOn}`);
+  log(`caméra ${facing==='environment'?'arrière':'frontale (démonstration)'} ${video.videoWidth}×${video.videoHeight}, torche ${torchOn}, photo pleine résolution ${window.ImageCapture ? 'disponible' : 'indisponible'}`);
   for (const step of STEPS){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
@@ -910,11 +1016,11 @@ async function runFingers(){
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); stopStreams(); return false; }
       if (r.skipped){ log(`${step.label.toLowerCase()} : prise ignorée par l'électeur`); break; }
-      if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} capturé${step.kind==='quatre'?'e':''}`, n > 1 ? `${r.good} doigts exploitables sur ${n}.` : 'Empreinte exploitable.', 'good'); await new Promise(x=>setTimeout(x,900)); break; }
+      if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} : prise enregistrée`, (n > 1 ? `${r.good} doigts exploitables sur ${n}` : 'Empreinte exploitable') + ` · ${Math.round(r.ppi)} ppi.`, 'good'); await new Promise(x=>setTimeout(x,1500)); break; }
       S.hands.attempts[step.id]++;
-      if (S.hands.attempts[step.id] >= CFG.MAX_ATTEMPTS){ log(`${step.label.toLowerCase()} : tentatives épuisées`); break; }
-      instr($('handInstr'), 'Empreintes peu lisibles', `${r.good} exploitable(s) sur ${n}. Essuyez vos doigts, activez la torche et recommencez.`, 'alert');
-      await new Promise(x=>setTimeout(x,2200));
+      if (S.hands.attempts[step.id] >= CFG.MAX_ATTEMPTS){ S.hands[step.id] = r; log(`${step.label.toLowerCase()} : tentatives épuisées, dernière prise conservée pour examen`); break; }
+      instr($('handInstr'), 'Empreintes peu lisibles', `${r.good} exploitable(s) sur ${n}. Essuyez vos doigts, allumez la torche et recommencez.`, 'alert');
+      await new Promise(x=>setTimeout(x,2500));
     }
   }
   stopStreams();
@@ -935,7 +1041,7 @@ function renderReview(){
   for (const st of STEPS.filter(s => s.kind === 'quatre')){
     const h = S.hands[st.id];
     if (!h){ blocks.push(`<p class="note">${st.label} : non capturée.</p>`); continue; }
-    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi estimés · ${h.good}/4 exploitables</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, f.q.score, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
+    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi (${h.scale || 'estimée'}) · ${h.good}/4 exploitables${h.flags?.length ? ' · ' + h.flags.join(', ') : ''}</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, f.q.score, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
   }
   const thumbs = STEPS.filter(s => s.kind === 'pouce');
   blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">Pouces</span><div class="grid">${thumbs.map(st => { const h = S.hands[st.id]; return h ? thumbHtml(`fp-${st.id}-0`, st.side==='droite'?'droit':'gauche', h.fingers[0].q.score, h.fingers[0].q.exploitable?'ok':'ko') : `<div class="thumb ko"><div class="q"><span>${st.side==='droite'?'droit':'gauche'}</span><b>—</b></div>non capturé</div>`; }).join('')}</div></div>`);
@@ -965,12 +1071,12 @@ async function seal(){
     electeur: { npi: sess.npi },
     terminal: { plateforme: 'web-prototype', webdriver: S.env.webdriver, cameras: S.env.cameras, camera_virtuelle: S.env.virtualCamera, camera_active: S.env.activeLabel, arriere: S.env.rear, attestation: 'SIMULEE' },
     visage: {
-      qualite_reference: { ied_px: +m.ied.toFixed(1), lacet_deg: +m.yaw.toFixed(1), tangage_deg: +m.pitch.toFixed(1), roulis_deg: +m.roll.toFixed(1), luminance: +m.luma.toFixed(0), equilibre: +m.balance.toFixed(2), nettete: +m.sharp.toFixed(1) },
+      capture_reference: S.face.reference.mode, qualite_reference: { ied_px: +m.ied.toFixed(1), lacet_deg: +m.yaw.toFixed(1), tangage_deg: +m.pitch.toFixed(1), roulis_deg: +m.roll.toFixed(1), luminance: +m.luma.toFixed(0), equilibre: +m.balance.toFixed(2), nettete: +m.sharp.toFixed(1) },
       defi: { demande: sess.challenge, realise: S.face.challenge.map(c=>({ action:c.action, t_ms:c.t_ms })) },
       pad_passif_indicatif: S.face.padSummary,
       tentatives: S.face.attempts + 1,
     },
-    empreintes: STEPS.map(st => S.hands[st.id] ? { prise: st.label, ppi_feuille: Math.round(S.hands[st.id].ppi), ppi_phalange: Math.round(S.hands[st.id].ppiPhalange||0), feuille: S.hands[st.id].sheet, exploitables: S.hands[st.id].good, sur: st.fingers.length, tentatives: S.hands.attempts[st.id]+1 } : { prise: st.label, capturee: false }),
+    empreintes: STEPS.map(st => S.hands[st.id] ? { prise: st.label, ppi: Math.round(S.hands[st.id].ppi), echelle: S.hands[st.id].scale, source: S.hands[st.id].source, mode: S.hands[st.id].mode, alertes: S.hands[st.id].flags, ppi_phalange: Math.round(S.hands[st.id].ppiPhalange||0), feuille: S.hands[st.id].sheet, exploitables: S.hands[st.id].good, sur: st.fingers.length, tentatives: S.hands.attempts[st.id]+1 } : { prise: st.label, capturee: false }),
     images: images.map(({_bytes, ...rest}) => rest),
   };
   // Charge utile : manifeste + images (base64 ici ; CBOR binaire en natif)
