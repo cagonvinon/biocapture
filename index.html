@@ -1,0 +1,1044 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Capture biométrique — Vote à distance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ink:#14211b; --paper:#f4f6f3; --card:#ffffff; --line:#d3dcd6; --muted:#5a6a61;
+  --green:#0b6b43; --green-soft:#e2efe8; --amber:#b67c00; --amber-soft:#fbf0d6;
+  --red:#b3261e; --red-soft:#f8e1df; --cam:#0a110d; --cam-ink:#eef3ef;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+[hidden]{display:none!important}
+button{font:inherit;cursor:pointer}
+h1,h2,h3{text-wrap:balance;margin:0;line-height:1.2}
+.app{max-width:520px;margin:0 auto;min-height:100%;display:flex;flex-direction:column}
+.screen{flex:1;display:flex;flex-direction:column;padding:calc(env(safe-area-inset-top,0px) + 20px) 16px calc(env(safe-area-inset-bottom,0px) + 20px);gap:18px}
+.eyebrow{font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.badge{display:inline-flex;align-items:center;gap:6px;font:500 11px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:6px 8px;border-radius:4px;background:var(--amber-soft);color:#6e4b00;width:max-content}
+.lead{color:var(--muted);margin:0}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:0;border-top:1px solid var(--line)}
+.steps li{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+.steps b{font:600 13px/1.6 var(--mono);color:var(--green)}
+.steps span{display:block;color:var(--muted);font-size:13.5px}
+label.field{display:grid;gap:6px;font-weight:500}
+input[type=text]{font:500 18px/1 var(--mono);letter-spacing:.08em;padding:14px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);width:100%}
+input[type=text]:focus-visible,button:focus-visible{outline:3px solid color-mix(in srgb,var(--green) 45%,transparent);outline-offset:2px}
+.hint{font-size:12.5px;color:var(--muted)}
+.btn{border:0;border-radius:6px;padding:14px 16px;font-weight:600;background:var(--green);color:#fff;width:100%}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.ghost{background:transparent;color:var(--green);border:1px solid var(--green)}
+.btn.small{width:auto;padding:9px 12px;font-size:13.5px}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.spacer{flex:1}
+.checks{display:grid;gap:0;border:1px solid var(--line);border-radius:8px;background:var(--card);overflow:hidden}
+.check{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:start;padding:11px 12px;border-bottom:1px solid var(--line)}
+.check:last-child{border-bottom:0}
+.check .dot{width:10px;height:10px;border-radius:50%;margin-top:6px;background:var(--line)}
+.check.ok .dot{background:var(--green)} .check.warn .dot{background:var(--amber)} .check.ko .dot{background:var(--red)}
+.check .t{font-weight:500}
+.check .d{font-size:12.5px;color:var(--muted)}
+.check .v{font:500 12px/1.6 var(--mono);color:var(--muted);text-align:right;max-width:150px;overflow-wrap:anywhere}
+.session{font:12px/1.5 var(--mono);color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}
+.session b{color:var(--ink);font-weight:500}
+
+/* Écrans caméra */
+.camscreen{position:fixed;inset:0;background:var(--cam);color:var(--cam-ink);display:flex;flex-direction:column;z-index:5}
+.camtop{padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 10px;display:flex;align-items:center;gap:10px}
+.camtop .eyebrow{color:#9fb3a8}
+.camtop .step{font:500 12px var(--mono);color:#9fb3a8;margin-left:auto}
+.viewport{position:relative;flex:1;overflow:hidden;background:#000}
+.viewport video,.viewport canvas.ov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.mirror{transform:scaleX(-1)}
+.instr{position:absolute;left:12px;right:12px;top:12px;background:rgba(10,17,13,.78);backdrop-filter:blur(6px);border-radius:8px;padding:12px 14px;display:grid;gap:4px}
+.instr h2{font-size:19px;font-weight:600}
+.instr p{margin:0;font-size:13.5px;color:#c6d4cc}
+.instr.alert{background:rgba(120,20,14,.85)}
+.instr.good{background:rgba(8,80,50,.85)}
+.progress{position:absolute;left:12px;right:12px;bottom:12px;display:flex;gap:6px}
+.progress i{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.2)}
+.progress i.on{background:#3fd08a}
+.progress i.cur{background:#f2c14b}
+.chips{display:flex;flex-wrap:wrap;gap:6px;padding:10px 16px 0}
+.chip{font:500 11.5px/1 var(--mono);padding:7px 8px;border-radius:4px;background:#1b2621;color:#9fb3a8;display:inline-flex;gap:6px;align-items:center}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:#4a5a52}
+.chip.ok{color:#bff0d6}.chip.ok::before{background:#3fd08a}
+.chip.ko{color:#ffd0cc}.chip.ko::before{background:#ff6b5e}
+.chip.warn{color:#ffe7a8}.chip.warn::before{background:#f2c14b}
+.metrics{font:11.5px/1.5 var(--mono);color:#8ea397;padding:6px 16px 0;display:flex;gap:14px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.metrics b{color:#dfe9e3;font-weight:500}
+.cambar{padding:12px 16px calc(env(safe-area-inset-bottom,0px) + 14px);display:flex;gap:10px;align-items:center}
+.cambar .btn.ghost{color:#cfe0d6;border-color:#3b4a42}
+.loading{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;color:#c6d4cc;font-size:14px}
+
+/* Revue */
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.thumb{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px;display:grid;gap:4px;font:11px/1.3 var(--mono);color:var(--muted)}
+.thumb canvas,.thumb img{width:100%;height:auto;display:block;border-radius:3px;background:#222}
+.thumb .q{display:flex;justify-content:space-between;gap:4px}
+.thumb.ok .q b{color:var(--green)} .thumb.ko .q b{color:var(--red)} .thumb.warn .q b{color:var(--amber)}
+.facegrid{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:8px}
+section.block{display:grid;gap:10px}
+section.block h3{font-size:15px}
+.note{font-size:12.5px;color:var(--muted);border-left:3px solid var(--line);padding-left:10px;margin:0}
+pre.code{margin:0;background:#101814;color:#d6e4dc;font:11.5px/1.5 var(--mono);padding:12px;border-radius:6px;overflow:auto;max-height:340px}
+details summary{cursor:pointer;font-weight:500}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font:12px/1.5 var(--mono)}
+.kv dt{color:var(--muted)} .kv dd{margin:0;overflow-wrap:anywhere}
+.result{border-radius:8px;padding:14px;background:var(--green-soft);border:1px solid color-mix(in srgb,var(--green) 30%,transparent)}
+.result.ko{background:var(--red-soft);border-color:color-mix(in srgb,var(--red) 30%,transparent)}
+.log{font:11px/1.55 var(--mono);color:var(--muted);max-height:220px;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px;white-space:pre-wrap}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- 0. ACCUEIL -->
+<main class="screen" id="s-accueil">
+  <span class="badge">Prototype de démonstration — aucune donnée transmise</span>
+  <div style="display:grid;gap:8px">
+    <span class="eyebrow">République du Bénin · Vote à distance</span>
+    <h1 style="font-size:26px">Module de capture biométrique</h1>
+    <p class="lead">Le téléphone sert uniquement de capteur. Il capture votre visage et vos empreintes, les chiffre pour le service d'authentification, puis les efface. La comparaison au RNPP a lieu côté serveur.</p>
+  </div>
+  <ol class="steps">
+    <li><b>1</b><div>Contrôle du terminal<span>Contexte sécurisé, caméras, signes d'automatisation ou de caméra virtuelle.</span></div></li>
+    <li><b>2</b><div>Visage<span>Photo de référence de face, puis deux mouvements tirés au hasard par le serveur.</span></div></li>
+    <li><b>3</b><div>Empreintes sans contact<span>Main posée sur une feuille blanche A4 : quatre doigts de chaque main, puis chaque pouce, avec la caméra arrière.</span></div></li>
+    <li><b>4</b><div>Chiffrement et transmission<span>Paquet chiffré pour le seul service d'authentification, puis effacement.</span></div></li>
+  </ol>
+  <label class="field" for="npi">Numéro personnel d'identification (NPI)
+    <input type="text" id="npi" inputmode="numeric" autocomplete="off" maxlength="10" value="1098765432">
+    <span class="hint">Valeur d'exemple. Dans le dispositif, le NPI est lié à l'inscription sur la liste de vote à distance.</span>
+  </label>
+  <div class="spacer"></div>
+  <button class="btn" id="b-start">Ouvrir une session de capture</button>
+</main>
+
+<!-- 1. TERMINAL -->
+<main class="screen" id="s-terminal" hidden>
+  <div style="display:grid;gap:6px">
+    <span class="eyebrow">Étape 1 sur 4</span>
+    <h1 style="font-size:22px">Contrôle du terminal</h1>
+    <div class="session" id="sessionInfo"></div>
+  </div>
+  <div class="checks" id="checks"></div>
+  <label class="row" style="align-items:center;gap:8px;font-size:13.5px" for="forceFinger" id="forceWrap" hidden>
+    <input type="checkbox" id="forceFinger"> Tenter quand même la capture d'empreintes (démonstration)
+  </label>
+  <div class="spacer"></div>
+  <button class="btn" id="b-toFace" disabled>Continuer vers la capture du visage</button>
+</main>
+
+<!-- 2. VISAGE -->
+<section class="camscreen" id="s-visage" hidden>
+  <div class="camtop"><span class="eyebrow">Étape 2 · Visage</span><span class="step" id="faceTimer"></span></div>
+  <div class="viewport">
+    <video id="vFace" class="mirror" playsinline muted></video>
+    <canvas id="oFace" class="ov mirror"></canvas>
+    <div class="loading" id="faceLoading">Chargement des modèles de détection…</div>
+    <div class="instr" id="faceInstr"><h2>Placez votre visage dans l'ovale</h2><p>Tenez le téléphone à hauteur des yeux, dans un endroit bien éclairé.</p></div>
+    <div class="progress" id="faceProgress"></div>
+  </div>
+  <div class="chips" id="faceChips"></div>
+  <div class="metrics" id="faceMetrics"></div>
+  <div class="cambar"><button class="btn ghost small" id="b-faceCancel">Abandonner</button><span class="spacer"></span><span class="step" id="faceAttempts" style="font:12px var(--mono);color:#9fb3a8"></span></div>
+</section>
+
+<!-- 3. EMPREINTES -->
+<section class="camscreen" id="s-doigts" hidden>
+  <div class="camtop"><span class="eyebrow">Étape 3 · Empreintes</span><span class="step" id="handStep"></span></div>
+  <div class="viewport">
+    <video id="vHand" playsinline muted></video>
+    <canvas id="oHand" class="ov"></canvas>
+    <div class="loading" id="handLoading">Ouverture de la caméra arrière…</div>
+    <div class="instr" id="handInstr"><h2>Posez une feuille blanche A4</h2><p>Sur une table sombre. La main se pose dessus, dos contre le papier.</p></div>
+  </div>
+  <div class="chips" id="handChips"></div>
+  <div class="metrics" id="handMetrics"></div>
+  <div class="cambar">
+    <button class="btn ghost small" id="b-handCancel">Abandonner</button>
+    <button class="btn ghost small" id="b-torch" hidden>Torche</button>
+    <span class="spacer"></span>
+    <button class="btn ghost small" id="b-skipHand" hidden>Ignorer cette main</button>
+  </div>
+</section>
+
+<!-- 4. REVUE -->
+<main class="screen" id="s-revue" hidden>
+  <div style="display:grid;gap:6px">
+    <span class="eyebrow">Étape 4 sur 4</span>
+    <h1 style="font-size:22px">Captures prêtes à chiffrer</h1>
+    <p class="lead">Ces images n'existent qu'en mémoire. Elles ne sont jamais écrites dans la galerie ni sur le stockage du téléphone.</p>
+  </div>
+  <section class="block">
+    <h3>Visage</h3>
+    <div class="facegrid" id="faceThumbs"></div>
+  </section>
+  <section class="block" id="fingerBlock">
+    <h3>Empreintes normalisées à 500 ppi</h3>
+    <div id="fingerThumbs" style="display:grid;gap:10px"></div>
+    <p class="note">Échelle mesurée sur la largeur de la feuille A4 (210 mm) ; la longueur des phalanges sert de contrôle de cohérence.</p>
+  </section>
+  <div class="spacer"></div>
+  <div class="row"><button class="btn ghost" id="b-restart" style="flex:1">Recommencer</button><button class="btn" id="b-seal" style="flex:2">Chiffrer le paquet</button></div>
+</main>
+
+<!-- 5. ENVOI -->
+<main class="screen" id="s-envoi" hidden>
+  <div style="display:grid;gap:6px">
+    <span class="eyebrow">Transmission</span>
+    <h1 style="font-size:22px">Paquet chiffré</h1>
+  </div>
+  <dl class="kv" id="envelope"></dl>
+  <details><summary>Manifeste (contenu du paquet, hors images)</summary><pre class="code" id="manifest"></pre></details>
+  <button class="btn" id="b-send">Transmettre au service d'authentification (simulé)</button>
+  <div class="result" id="result" hidden></div>
+  <section class="block" id="wipeBlock" hidden>
+    <h3>Effacement</h3>
+    <div class="log" id="wipeLog"></div>
+  </section>
+  <div class="spacer"></div>
+  <details><summary>Journal de la session</summary><div class="log" id="journal"></div></details>
+  <button class="btn ghost" id="b-new" hidden>Nouvelle session</button>
+</main>
+
+</div>
+
+<script type="module">
+/* =====================================================================
+   Module de capture biométrique — prototype web de démonstration
+   Vote à distance des Béninois de l'étranger (note conceptuelle, § 4.2)
+   Détection : @vladmandic/human 3.3.6 (TensorFlow.js, modèles MediaPipe)
+   ===================================================================== */
+import Human from 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.esm.js';
+
+const CFG = {
+  MODELS: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
+  SESSION_TTL_S: 300,          // durée de vie d'une session (nonce)
+  MAX_ATTEMPTS: 3,             // tentatives par modalité
+  FACE: {
+    IED_MIN: 90,               // distance inter-pupillaire minimale (px) — ISO/IEC 39794-5 / ICAO
+    POSE_MAX_DEG: 10,          // lacet / tangage / roulis max. pour la photo de référence
+    LUMA_MIN: 70, LUMA_MAX: 205,
+    BALANCE_MIN: 0.6,          // rapport d'éclairage gauche / droite
+    SHARP_MIN: 18,             // variance du laplacien (à calibrer)
+    EYE_OPEN_MIN: 0.28, EYE_CLOSED_MAX: 0.2,
+    TURN_ACTION: 0.35,         // ≈ 20° de rotation
+    TURN_CENTER: 0.15,
+    STABLE_FRAMES: 6,
+    ACTION_TIMEOUT_MS: 8000,
+  },
+  HAND: {
+    DETECT_W: 960,             // largeur de l'image transmise au détecteur
+    PPI_TARGET: 500, PPI_MIN: 400, PPI_MAX: 1400,
+    STABLE_FRAMES: 5,
+    MOVE_MAX: 0.012,           // déplacement max. des extrémités entre deux images (fraction de largeur)
+    MIN_GOOD: { quatre: 2, pouce: 1 }, // doigts exploitables requis par prise
+  },
+  // Feuille de référence posée sous la main. A4 : 210 mm entre les grands bords.
+  // US Letter : 215.9 mm. A4 pliée en deux (A5) : 148.5 mm, résolution plus élevée.
+  SHEET: { LABEL: 'A4', WIDTH_MM: 210, REQUIRED: true },
+  // longueur approximative articulation distale → extrémité (mm), adulte
+  PHALANX_MM: { index: 22, middle: 23, ring: 22, pinky: 19, thumb: 25 },
+};
+// Codes de position des doigts (ISO/IEC 39794-4) : 2–5 main droite, 7–10 main gauche
+const FINGERS = [
+  { key:'index',  tip:8,  dip:7,  mcp:5,  fr:'index',      code:{droite:2, gauche:7} },
+  { key:'middle', tip:12, dip:11, mcp:9,  fr:'majeur',     code:{droite:3, gauche:8} },
+  { key:'ring',   tip:16, dip:15, mcp:13, fr:'annulaire',  code:{droite:4, gauche:9} },
+  { key:'pinky',  tip:20, dip:19, mcp:17, fr:'auriculaire',code:{droite:5, gauche:10} },
+];
+const THUMB = { key:'thumb', tip:4, dip:3, mcp:2, fr:'pouce', code:{droite:1, gauche:6} };
+// Ordre de capture 4-4-1-1 : quatre doigts de chaque main, puis chaque pouce séparément
+const STEPS = [
+  { id:'droite',       side:'droite', kind:'quatre', fingers:FINGERS, label:'Main droite' },
+  { id:'gauche',       side:'gauche', kind:'quatre', fingers:FINGERS, label:'Main gauche' },
+  { id:'pouce_droite', side:'droite', kind:'pouce',  fingers:[THUMB], label:'Pouce droit' },
+  { id:'pouce_gauche', side:'gauche', kind:'pouce',  fingers:[THUMB], label:'Pouce gauche' },
+];
+const ACTIONS = {
+  gauche: { titre:'Tournez la tête vers la gauche', aide:'Lentement, puis revenez de face.' },
+  droite: { titre:'Tournez la tête vers la droite', aide:'Lentement, puis revenez de face.' },
+  cligner:{ titre:'Clignez des yeux', aide:'Fermez les deux yeux une seconde, puis rouvrez-les.' },
+};
+
+const $ = (id) => document.getElementById(id);
+const t0 = performance.now();
+const journal = [];
+function log(msg){ const line = `+${String(Math.round(performance.now()-t0)).padStart(6,' ')} ms  ${msg}`; journal.push(line); const j=$('journal'); if(j) j.textContent = journal.join('\n'); }
+function show(id){ for (const s of document.querySelectorAll('.screen,.camscreen')) s.hidden = (s.id !== id); window.scrollTo(0,0); }
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const hex = (buf) => [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+const sha256 = async (bytes) => hex(await crypto.subtle.digest('SHA-256', bytes));
+const enc = new TextEncoder();
+const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
+const dist = (a,b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+/* ---------------------------------------------------------------------
+   État de la session
+   --------------------------------------------------------------------- */
+const S = {
+  session: null, server: null, device: null,
+  env: {}, fingerEnabled: false,
+  face: { attempts: 0, reference: null, challenge: [], pad: { real: [], live: [] } },
+  hands: { droite: null, gauche: null, pouce_droite: null, pouce_gauche: null, attempts: { droite:0, gauche:0, pouce_droite:0, pouce_gauche:0 } },
+  sealed: null,
+  streams: [], canvases: [], buffers: [],
+};
+
+/* ---------------------------------------------------------------------
+   Ouverture de session (simule la réponse du service d'authentification)
+   --------------------------------------------------------------------- */
+async function openSession(npi){
+  // Service d'authentification simulé : clé publique éphémère de session
+  S.server = await crypto.subtle.generateKey({ name:'ECDH', namedCurve:'P-256' }, true, ['deriveBits']);
+  // Clé du terminal, non exportable (équivalent Keystore / Secure Enclave)
+  S.device = await crypto.subtle.generateKey({ name:'ECDSA', namedCurve:'P-256' }, false, ['sign','verify']);
+  const pool = ['gauche','droite','cligner'];
+  const r = rnd(2); const first = pool.splice(r[0] % 3, 1)[0]; const second = pool[r[1] % 2];
+  S.session = {
+    id: crypto.randomUUID(),
+    npi,
+    nonce: b64u(rnd(32)),
+    challenge: [first, second],
+    expires: Date.now() + CFG.SESSION_TTL_S*1000,
+    serverKid: 'auth-svc-' + hex(rnd(4)),
+  };
+  log(`session ouverte ${S.session.id} — défi tiré par le serveur : ${S.session.challenge.join(' → ')}`);
+}
+function sessionLeft(){ return Math.max(0, Math.round((S.session.expires - Date.now())/1000)); }
+
+/* ---------------------------------------------------------------------
+   Étape 1 — contrôle du terminal
+   --------------------------------------------------------------------- */
+const VIRTUAL_CAM = /virtual|obs|manycam|snap camera|xsplit|droidcam|epoccam|iriun|splitcam|camtwist|mmhmm|fake/i;
+function renderChecks(items){
+  $('checks').innerHTML = items.map(c => `<div class="check ${c.s}"><span class="dot"></span><div><div class="t">${c.t}</div><div class="d">${c.d}</div></div><div class="v">${c.v ?? ''}</div></div>`).join('');
+}
+async function checkTerminal(){
+  const items = [];
+  const add = (s,t,d,v) => { items.push({s,t,d,v}); renderChecks(items); };
+  add(isSecureContext?'ok':'ko', 'Contexte sécurisé', 'Caméra et chiffrement exigent une connexion HTTPS.', isSecureContext?'oui':'non');
+  add(crypto?.subtle?'ok':'ko', 'Chiffrement matériel/logiciel', 'API WebCrypto : ECDH P-256, AES-256-GCM, ECDSA.', crypto?.subtle?'disponible':'absent');
+  add(navigator.webdriver?'ko':'ok', 'Automatisation du navigateur', 'Un pilotage automatisé signale une tentative d\'injection.', navigator.webdriver?'détectée':'non détectée');
+  if (!navigator.mediaDevices?.getUserMedia){ add('ko','Caméra','Aucune API caméra.','—'); return; }
+  let front;
+  try {
+    front = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false });
+    const st = front.getVideoTracks()[0].getSettings();
+    add('ok','Caméra frontale','Autorisation accordée.', `${st.width}×${st.height}`);
+  } catch(e){ add('ko','Caméra frontale', 'Autorisation refusée ou caméra absente : '+e.name, '—'); return; }
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+  const suspects = devices.filter(d=>VIRTUAL_CAM.test(d.label));
+  const activeLabel = front.getVideoTracks()[0].label;
+  front.getTracks().forEach(t=>t.stop());
+  S.env.cameras = devices.length; S.env.virtualCamera = suspects.map(d=>d.label); S.env.activeLabel = activeLabel;
+  add(suspects.length? (VIRTUAL_CAM.test(activeLabel)?'ko':'warn') : 'ok', 'Caméras virtuelles', suspects.length? 'Pilote de caméra virtuelle présent : '+suspects.map(d=>d.label).join(', ') : 'Aucun pilote de caméra virtuelle reconnu.', `${devices.length} caméra(s)`);
+
+  // Caméra arrière : résolution, torche, mise au point
+  let rear = null, caps = {}, rs = {};
+  try {
+    rear = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{exact:'environment'}, width:{ideal:3840}, height:{ideal:2160} }, audio:false });
+    const tr = rear.getVideoTracks()[0]; caps = tr.getCapabilities ? tr.getCapabilities() : {}; rs = tr.getSettings();
+    rear.getTracks().forEach(t=>t.stop());
+  } catch(e){ rear = null; }
+  const maxW = Math.max(caps.width?.max || rs.width || 0, caps.height?.max || rs.height || 0);
+  const torch = !!caps.torch; const af = Array.isArray(caps.focusMode) ? caps.focusMode.includes('continuous') : null;
+  S.env.rear = { present: !!rear, maxWidth: maxW, torch, continuousFocus: af };
+  if (!rear){
+    add('warn','Caméra arrière','Absente : la capture d\'empreintes n\'est pas possible sur ce terminal. Le visage seul sera transmis.','—');
+    S.fingerEnabled = false; $('forceWrap').hidden = false;
+  } else {
+    const needPx = Math.ceil(CFG.HAND.PPI_MIN / 25.4 * CFG.SHEET.WIDTH_MM);
+    const okRes = maxW >= needPx;
+    add(okRes?'ok':'warn','Caméra arrière', okRes? `Résolution suffisante : la largeur de la feuille ${CFG.SHEET.LABEL} peut être lue à ${Math.round(maxW/CFG.SHEET.WIDTH_MM*25.4)} ppi au plus.` : `Moins de ${needPx} px sur le grand côté : empreintes inexploitables avec une feuille ${CFG.SHEET.LABEL}.`, `${maxW} px`);
+    add(torch?'ok':'warn','Torche', torch? 'Pilotable : éclairage homogène des crêtes.' : 'Non pilotable depuis le navigateur. Prévoir une lumière forte.', torch?'oui':'non');
+    add(af===false?'warn':'ok','Mise au point continue', af===null? 'Information non exposée par le navigateur.' : (af? 'Disponible.' : 'Absente : risque de flou à courte distance.'), af===null?'inconnu':(af?'oui':'non'));
+    S.fingerEnabled = okRes;
+    if (!okRes) $('forceWrap').hidden = false;
+  }
+  add('warn','Attestation d\'intégrité','Simulée. En natif : Play Integrity (Android) ou App Attest (iOS), vérifiée côté serveur.','simulée');
+  S.env.ua = navigator.userAgent; S.env.webdriver = !!navigator.webdriver;
+  log(`terminal contrôlé — caméras ${devices.length}, arrière ${maxW}px, torche ${torch}, empreintes ${S.fingerEnabled?'oui':'non'}`);
+  const blocking = items.some(c=>c.s==='ko');
+  $('b-toFace').disabled = blocking;
+  if (blocking) log('terminal refusé : contrôle bloquant en échec');
+}
+
+/* ---------------------------------------------------------------------
+   Détection — Human (TensorFlow.js)
+   --------------------------------------------------------------------- */
+let human = null;
+async function getHuman(){
+  if (human) return human;
+  human = new Human({
+    modelBasePath: CFG.MODELS, backend: 'webgl', debug: false, cacheSensitivity: 0, warmup: 'none',
+    filter: { enabled: true, equalization: false, flip: false },
+    face: { enabled: true,
+      detector: { rotation: true, maxDetected: 2, minConfidence: 0.5, skipFrames: 2, skipTime: 150 },
+      mesh: { enabled: true }, iris: { enabled: true }, attention: { enabled: false },
+      emotion: { enabled: false }, description: { enabled: false },
+      antispoof: { enabled: true, skipFrames: 10, skipTime: 500 },
+      liveness: { enabled: true, skipFrames: 10, skipTime: 500 } },
+    hand: { enabled: true, maxDetected: 2, minConfidence: 0.55, rotation: true, skipFrames: 1, skipTime: 80, landmarks: true },
+    body: { enabled: false }, object: { enabled: false }, segmentation: { enabled: false }, gesture: { enabled: false },
+  });
+  await human.load();
+  log(`modèles chargés — backend ${human.tf.getBackend()}`);
+  return human;
+}
+
+/* ---------------------------------------------------------------------
+   Outils image
+   --------------------------------------------------------------------- */
+function newCanvas(w,h){ const c = document.createElement('canvas'); c.width = Math.max(1,Math.round(w)); c.height = Math.max(1,Math.round(h)); S.canvases.push(c); return c; }
+// Image courante : un seul tampon réutilisé pour l'analyse ; copie conservée seulement à la capture
+const work = document.createElement('canvas');
+function frameOf(video, keep=false){
+  const c = keep ? newCanvas(video.videoWidth, video.videoHeight) : work;
+  if (!keep && (c.width !== video.videoWidth || c.height !== video.videoHeight)){ c.width = video.videoWidth; c.height = video.videoHeight; }
+  c.getContext('2d').drawImage(video,0,0); return c;
+}
+function keepCopy(src){ const c = newCanvas(src.width, src.height); c.getContext('2d').drawImage(src,0,0); return c; }
+const scratch = document.createElement('canvas');
+function grayRegion(src, x, y, w, h, maxSide=160, channel='luma'){
+  x = clamp(Math.floor(x),0,src.width-1); y = clamp(Math.floor(y),0,src.height-1);
+  w = clamp(Math.floor(w),1,src.width-x); h = clamp(Math.floor(h),1,src.height-y);
+  const k = Math.min(1, maxSide/Math.max(w,h)); const W = Math.max(1,Math.round(w*k)), H = Math.max(1,Math.round(h*k));
+  const c = scratch; c.width=W; c.height=H; const ctx = c.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(src, x, y, w, h, 0, 0, W, H);
+  const d = ctx.getImageData(0,0,W,H).data; const g = new Float32Array(W*H);
+  for (let i=0,j=0;i<g.length;i++,j+=4) g[i] = channel==='green' ? d[j+1] : 0.299*d[j]+0.587*d[j+1]+0.114*d[j+2];
+  return { g, W, H };
+}
+function stats(g){ let s=0,s2=0,hi=0; for (const v of g){ s+=v; s2+=v*v; if(v>=245) hi++; } const m=s/g.length; return { mean:m, std:Math.sqrt(Math.max(0,s2/g.length-m*m)), glare:hi/g.length }; }
+function laplacianVar({g,W,H}){
+  let s=0,s2=0,n=0;
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; const l = g[i-1]+g[i+1]+g[i-W]+g[i+W]-4*g[i]; s+=l; s2+=l*l; n++; }
+  if (!n) return 0; const m=s/n; return s2/n - m*m;
+}
+// Normalisation locale du contraste (aperçu des crêtes)
+function ridgeEnhance(src){
+  const W=src.width,H=src.height; const ctx=src.getContext('2d',{willReadFrequently:true}); const img=ctx.getImageData(0,0,W,H); const d=img.data;
+  const g=new Float32Array(W*H); for(let i=0,j=0;i<g.length;i++,j+=4) g[i]=d[j+1];
+  const r=Math.max(4,Math.round(W/40));
+  const I=new Float64Array((W+1)*(H+1)), I2=new Float64Array((W+1)*(H+1));
+  for(let y=0;y<H;y++){ let rs=0,rs2=0; for(let x=0;x<W;x++){ const v=g[y*W+x]; rs+=v; rs2+=v*v; I[(y+1)*(W+1)+x+1]=I[y*(W+1)+x+1]+rs; I2[(y+1)*(W+1)+x+1]=I2[y*(W+1)+x+1]+rs2; } }
+  const out=newCanvas(W,H); const octx=out.getContext('2d'); const o=octx.createImageData(W,H);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const x0=Math.max(0,x-r),x1=Math.min(W,x+r+1),y0=Math.max(0,y-r),y1=Math.min(H,y+r+1); const n=(x1-x0)*(y1-y0);
+    const s=I[y1*(W+1)+x1]-I[y0*(W+1)+x1]-I[y1*(W+1)+x0]+I[y0*(W+1)+x0];
+    const s2=I2[y1*(W+1)+x1]-I2[y0*(W+1)+x1]-I2[y1*(W+1)+x0]+I2[y0*(W+1)+x0];
+    const m=s/n, sd=Math.sqrt(Math.max(1,s2/n-m*m)); const v=clamp(128-48*(g[y*W+x]-m)/sd,0,255); const k=(y*W+x)*4;
+    o.data[k]=o.data[k+1]=o.data[k+2]=v; o.data[k+3]=255;
+  }
+  octx.putImageData(o,0,0); return out;
+}
+function toGray(src){ const c=newCanvas(src.width,src.height); const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(src,0,0); const img=ctx.getImageData(0,0,c.width,c.height); const d=img.data; for(let j=0;j<d.length;j+=4){ d[j]=d[j+2]=d[j+1]; } ctx.putImageData(img,0,0); return c; }
+async function canvasBytes(c, type='image/png', q){ const blob = await new Promise(r=>c.toBlob(r, type, q)); const buf = new Uint8Array(await blob.arrayBuffer()); S.buffers.push(buf); return buf; }
+
+/* Mappage coordonnées vidéo → canevas d'affichage (object-fit: cover) */
+function fitCover(canvas, vw, vh){
+  const cw = canvas.clientWidth, ch = canvas.clientHeight; const dpr = Math.min(2, devicePixelRatio||1);
+  if (canvas.width !== Math.round(cw*dpr) || canvas.height !== Math.round(ch*dpr)){ canvas.width=Math.round(cw*dpr); canvas.height=Math.round(ch*dpr); }
+  const s = Math.max(cw/vw, ch/vh); const ox = (cw - vw*s)/2, oy = (ch - vh*s)/2;
+  const ctx = canvas.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,cw,ch);
+  return { ctx, s, ox, oy, cw, ch, P:(x,y)=>[ox+x*s, oy+y*s] };
+}
+function chips(el, list){ el.innerHTML = list.map(([label,state])=>`<span class="chip ${state}">${label}</span>`).join(''); }
+function instr(el, title, text, mode=''){ el.className = 'instr' + (mode?' '+mode:''); el.innerHTML = `<h2>${title}</h2><p>${text}</p>`; }
+
+async function openCamera(video, facing, w, h){
+  const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode: facing, width:{ideal:w}, height:{ideal:h} }, audio:false });
+  S.streams.push(stream); video.srcObject = stream; await video.play();
+  await new Promise(r => video.readyState >= 2 ? r() : video.onloadeddata = r);
+  return stream;
+}
+function stopStreams(){ for (const s of S.streams) s.getTracks().forEach(t=>t.stop()); S.streams = []; }
+
+/* ---------------------------------------------------------------------
+   Étape 2 — visage : qualité + défi actif
+   --------------------------------------------------------------------- */
+function eyeOpenness(m){
+  const L = Math.abs(m[374][1]-m[386][1]) / Math.max(1,Math.abs(m[443][1]-m[450][1]));
+  const R = Math.abs(m[145][1]-m[159][1]) / Math.max(1,Math.abs(m[223][1]-m[230][1]));
+  return { L, R };
+}
+function faceMetrics(res, frameSrc){
+  const faces = res.face || [];
+  const out = { count: faces.length };
+  if (faces.length !== 1 || !faces[0].mesh || faces[0].mesh.length < 468) return out;
+  const f = faces[0], m = f.mesh, a = f.annotations || {};
+  const li = a.leftEyeIris?.[0], ri = a.rightEyeIris?.[0];
+  const eL = li || m[263], eR = ri || m[33];
+  out.eyeL = eL; out.eyeR = eR;
+  out.ied = dist(eL, eR) * (li && ri ? 1 : 0.68);
+  const ang = f.rotation?.angle || { yaw:0, pitch:0, roll:0 };
+  out.yaw = ang.yaw*180/Math.PI; out.pitch = ang.pitch*180/Math.PI;
+  out.roll = Math.atan2(eL[1]-eR[1], eL[0]-eR[0]) * 180/Math.PI;
+  const xDiff = Math.abs(m[33][0]-m[263][0]) || 1; out.turn = ((m[33][2]||0) - (m[263][2]||0)) / xDiff;
+  const eo = eyeOpenness(m); out.eyes = Math.min(eo.L, eo.R);
+  const [bx,by,bw,bh] = f.box; out.box = f.box;
+  const reg = grayRegion(frameSrc, bx+bw*0.15, by+bh*0.15, bw*0.7, bh*0.7, 160);
+  const st = stats(reg.g); out.luma = st.mean; out.sharp = laplacianVar(reg);
+  const lh = grayRegion(frameSrc, bx+bw*0.1, by+bh*0.3, bw*0.35, bh*0.4, 60), rh = grayRegion(frameSrc, bx+bw*0.55, by+bh*0.3, bw*0.35, bh*0.4, 60);
+  const ml = stats(lh.g).mean, mr = stats(rh.g).mean; out.balance = Math.min(ml,mr)/Math.max(1,Math.max(ml,mr));
+  out.real = f.real; out.live = f.live;
+  out.cx = (bx+bw/2)/frameSrc.width; out.cy = (by+bh/2)/frameSrc.height; out.hRatio = bh/frameSrc.height;
+  return out;
+}
+function faceChecks(M){
+  const F = CFG.FACE;
+  const c = {
+    unique: M.count===1,
+    distance: M.ied >= F.IED_MIN && M.hRatio < 0.85,
+    centre: M.cx>0.3 && M.cx<0.7 && M.cy>0.25 && M.cy<0.7,
+    pose: Math.abs(M.yaw)<=F.POSE_MAX_DEG && Math.abs(M.pitch)<=F.POSE_MAX_DEG+5 && Math.abs(M.roll)<=F.POSE_MAX_DEG && Math.abs(M.turn)<F.TURN_CENTER,
+    lumiere: M.luma>=F.LUMA_MIN && M.luma<=F.LUMA_MAX && M.balance>=F.BALANCE_MIN,
+    nettete: M.sharp>=F.SHARP_MIN,
+    yeux: M.eyes>=F.EYE_OPEN_MIN,
+  };
+  c.all = Object.values(c).every(Boolean);
+  return c;
+}
+function faceAdvice(M, c){
+  if (M.count===0) return ['Aucun visage détecté','Placez votre visage dans l\'ovale.'];
+  if (M.count>1) return ['Plusieurs visages','Une seule personne doit être dans le champ.','alert'];
+  if (!M.ied) return ['Visage partiel','Dégagez le visage entier.'];
+  if (M.ied < CFG.FACE.IED_MIN) return ['Rapprochez-vous','Le visage est trop petit pour une comparaison fiable.'];
+  if (M.hRatio >= 0.85) return ['Éloignez-vous légèrement','Le visage doit tenir entièrement dans l\'ovale.'];
+  if (!c.centre) return ['Centrez votre visage','Alignez-le dans l\'ovale.'];
+  if (!c.lumiere) return [M.luma<CFG.FACE.LUMA_MIN?'Trop sombre':(M.luma>CFG.FACE.LUMA_MAX?'Trop de lumière':'Éclairage inégal'),'Faites face à une source de lumière douce.'];
+  if (!c.pose) return ['Regardez l\'objectif','Tête droite, de face.'];
+  if (!c.yeux) return ['Ouvrez les yeux','Regardez l\'objectif.'];
+  if (!c.nettete) return ['Image floue','Tenez le téléphone immobile.'];
+  return ['Ne bougez plus','Capture en cours…','good'];
+}
+// Image « token » frontale : IED = W/4, yeux à 0,6·W du haut, roulis corrigé (ISO/IEC 39794-5)
+function faceToken(src, eL, eR){
+  const ied = dist(eL,eR); const W = Math.round(clamp(ied*4, 240, 720)); const H = Math.round(W*4/3);
+  const c = newCanvas(W,H); const ctx = c.getContext('2d');
+  const mx=(eL[0]+eR[0])/2, my=(eL[1]+eR[1])/2; const ang = Math.atan2(eL[1]-eR[1], eL[0]-eR[0]); const k = (W/4)/ied;
+  ctx.fillStyle='#808080'; ctx.fillRect(0,0,W,H);
+  ctx.translate(W/2, 0.6*W); ctx.rotate(-ang); ctx.scale(k,k); ctx.translate(-mx,-my); ctx.drawImage(src,0,0);
+  return c;
+}
+function smallFrame(src, w=480){ const k = w/src.width; const c = newCanvas(w, src.height*k); c.getContext('2d').drawImage(src,0,0,c.width,c.height); return c; }
+
+function drawFaceOverlay(canvas, video, M, state){
+  const { ctx, cw, ch, P, s } = fitCover(canvas, video.videoWidth, video.videoHeight);
+  const rx = Math.min(cw*0.36, ch*0.26), ry = rx*1.32, cx=cw/2, cy=ch*0.46;
+  ctx.fillStyle='rgba(6,10,8,.55)'; ctx.beginPath(); ctx.rect(0,0,cw,ch); ctx.ellipse(cx,cy,rx,ry,0,0,Math.PI*2); ctx.fill('evenodd');
+  ctx.lineWidth=3; ctx.strokeStyle = state==='good' ? '#3fd08a' : (state==='alert' ? '#ff6b5e' : 'rgba(255,255,255,.75)');
+  ctx.beginPath(); ctx.ellipse(cx,cy,rx,ry,0,0,Math.PI*2); ctx.stroke();
+  if (M?.eyeL){ ctx.fillStyle='#f2c14b'; for (const e of [M.eyeL,M.eyeR]){ const [x,y]=P(e[0],e[1]); ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill(); } }
+}
+function setProgress(el, n, done, cur){ el.innerHTML = Array.from({length:n},(_,i)=>`<i class="${i<done?'on':(i===cur?'cur':'')}"></i>`).join(''); }
+
+async function runFace(){
+  show('s-visage');
+  const video = $('vFace'), ov = $('oFace');
+  $('faceAttempts').textContent = `tentative ${S.face.attempts+1}/${CFG.MAX_ATTEMPTS}`;
+  const steps = 1 + S.session.challenge.length;
+  setProgress($('faceProgress'), steps, 0, 0);
+  try { await openCamera(video, 'user', 1280, 720); } catch(e){ instr($('faceInstr'),'Caméra indisponible', e.name, 'alert'); return; }
+  const H = await getHuman();
+  $('faceLoading').hidden = true;
+  log(`caméra frontale ${video.videoWidth}×${video.videoHeight} — ${S.streams.at(-1).getVideoTracks()[0].label}`);
+
+  let phase = 'ref', stable = 0, idx = 0, actionStart = 0, sawClosed = false, needCenter = false, lastIed = 0, lost = 0;
+  const challengeFrames = []; let reference = null;
+  const F = CFG.FACE;
+  const fail = (why) => { S.face.attempts++; log(`visage : échec de la tentative — ${why}`); stopStreams(); return why; };
+
+  const result = await new Promise((resolve) => {
+    const loop = async () => {
+      if (!S.streams.length) return;
+      $('faceTimer').textContent = `session ${sessionLeft()} s`;
+      if (sessionLeft() === 0) return resolve(fail('session expirée'));
+      let res;
+      try { res = await H.detect(video, { face:{ enabled:true }, hand:{ enabled:false } }); }
+      catch(e){ log('détection impossible : '+e.message); return resolve(fail('erreur du moteur de détection')); }
+      const frame = frameOf(video);
+      const M = faceMetrics(res, frame);
+      const c = M.ied ? faceChecks(M) : { unique: M.count===1 };
+      if (typeof M.real === 'number') S.face.pad.real.push(M.real);
+      if (typeof M.live === 'number') S.face.pad.live.push(M.live);
+      chips($('faceChips'), [
+        ['visage unique', c.unique?'ok':'ko'], ['distance', c.distance?'ok':'ko'], ['de face', c.pose?'ok':'warn'],
+        ['éclairage', c.lumiere?'ok':'ko'], ['netteté', c.nettete?'ok':'warn'], ['yeux ouverts', c.yeux?'ok':'warn'] ]);
+      $('faceMetrics').innerHTML = M.ied ? `IED <b>${M.ied.toFixed(0)} px</b> lacet <b>${M.yaw.toFixed(0)}°</b> roulis <b>${M.roll.toFixed(0)}°</b> luma <b>${M.luma.toFixed(0)}</b> netteté <b>${M.sharp.toFixed(0)}</b> PAD <b>${(M.real??0).toFixed(2)}/${(M.live??0).toFixed(2)}</b>` : '';
+
+      // Continuité : le même visage doit rester dans le champ pendant tout le défi
+      if (phase !== 'ref'){
+        if (M.count !== 1){ if (++lost > 20) return resolve(fail('visage perdu pendant le défi')); }
+        else { lost = 0; if (lastIed && Math.abs(M.ied-lastIed)/lastIed > 0.35) return resolve(fail('rupture de continuité du visage')); lastIed = M.ied; }
+      }
+
+      if (phase === 'ref'){
+        const [t,d,mode] = faceAdvice(M, c); instr($('faceInstr'), t, d, mode);
+        drawFaceOverlay(ov, video, M, mode);
+        stable = c.all ? stable+1 : 0;
+        if (stable >= F.STABLE_FRAMES){
+          reference = { frame: keepCopy(frame), M: { ...M } };
+          log(`photo de référence — IED ${M.ied.toFixed(0)} px, netteté ${M.sharp.toFixed(0)}, luma ${M.luma.toFixed(0)}`);
+          phase = 'action'; idx = 0; actionStart = performance.now(); lastIed = M.ied; sawClosed = false; needCenter = false;
+          setProgress($('faceProgress'), steps, 1, 1);
+        }
+      } else if (phase === 'action'){
+        const act = S.session.challenge[idx]; const A = ACTIONS[act];
+        drawFaceOverlay(ov, video, M, '');
+        if (needCenter){
+          instr($('faceInstr'), 'Revenez de face', 'Regardez à nouveau l\'objectif.');
+          if (M.ied && Math.abs(M.turn) < F.TURN_CENTER && M.eyes >= F.EYE_OPEN_MIN){ needCenter = false; idx++; actionStart = performance.now(); sawClosed = false;
+            if (idx >= S.session.challenge.length){ stopStreams(); return resolve({ ok:true }); }
+            setProgress($('faceProgress'), steps, 1+idx, 1+idx);
+          }
+        } else {
+          instr($('faceInstr'), A.titre, A.aide);
+          const elapsed = performance.now() - actionStart;
+          if (elapsed > F.ACTION_TIMEOUT_MS) return resolve(fail(`mouvement « ${act} » non réalisé dans le délai`));
+          let done = false;
+          if (M.ied){
+            if (act === 'gauche' && M.turn < -F.TURN_ACTION) done = true;
+            if (act === 'droite' && M.turn >  F.TURN_ACTION) done = true;
+            if (act === 'cligner'){ if (M.eyes < F.EYE_CLOSED_MAX) sawClosed = true; else if (sawClosed && M.eyes >= F.EYE_OPEN_MIN) done = true; }
+            // mouvement opposé à celui demandé : indice de rejeu d'une vidéo préenregistrée
+            if ((act === 'gauche' && M.turn > F.TURN_ACTION) || (act === 'droite' && M.turn < -F.TURN_ACTION)) return resolve(fail(`mouvement contraire au défi « ${act} »`));
+          }
+          if (done){
+            challengeFrames.push({ action: act, t_ms: Math.round(elapsed), frame: smallFrame(frame), turn: +M.turn.toFixed(3), eyes: +M.eyes.toFixed(3) });
+            log(`défi « ${act} » réalisé en ${Math.round(elapsed)} ms`);
+            setProgress($('faceProgress'), steps, 2+idx, -1);
+            needCenter = true;
+          }
+        }
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+
+  if (result?.ok){
+    const tok = faceToken(reference.frame, reference.M.eyeL, reference.M.eyeR);
+    const mean = (a) => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
+    S.face.reference = { token: tok, metrics: reference.M };
+    S.face.challenge = challengeFrames;
+    S.face.padSummary = { real: mean(S.face.pad.real), live: mean(S.face.pad.live), frames: S.face.pad.real.length };
+    log(`visage terminé — PAD passif indicatif real=${S.face.padSummary.real?.toFixed(2)} live=${S.face.padSummary.live?.toFixed(2)}`);
+    return true;
+  }
+  if (S.face.attempts >= CFG.MAX_ATTEMPTS){
+    instr($('faceInstr'), 'Authentification impossible en ligne', 'Nombre maximal de tentatives atteint. Adressez-vous à la mission diplomatique.', 'alert');
+    log('visage : tentatives épuisées → orientation vers la mission diplomatique');
+    return false;
+  }
+  instr($('faceInstr'), 'Nouvelle tentative', result + '. Reprise dans 2 secondes.', 'alert');
+  await new Promise(r=>setTimeout(r,2000));
+  return runFace();
+}
+
+/* ---------------------------------------------------------------------
+   Étape 3 — empreintes sans contact : 4 doigts par main, puis chaque pouce
+   --------------------------------------------------------------------- */
+let torchOn = false;
+const mean = (a) => a.reduce((x,y)=>x+y,0)/a.length;
+function handAnalysis(h, W, step){
+  const k = h.keypoints; const out = { ok:false };
+  if (!k || k.length < 21) return out;
+  const wrist = k[0];
+  const spacing = mean([dist(k[5],k[9]), dist(k[9],k[13]), dist(k[13],k[17])]);
+  out.thumbSide = k[4][0] > k[17][0] ? 'droite' : 'gauche'; // pouce à droite de l'image ⇒ main droite, paume visible
+  if (step.kind === 'quatre'){
+    out.extended = FINGERS.every(f => dist(wrist,k[f.tip]) > dist(wrist,k[f.dip-1]) * 1.08);
+    const dir = [k[12][0]-k[9][0], k[12][1]-k[9][1]]; out.angle = Math.atan2(dir[0], -dir[1]) * 180/Math.PI;
+    out.upright = Math.abs(out.angle) < 40;
+    out.ppi = mean(FINGERS.map(f => dist(k[f.dip], k[f.tip]) / (CFG.PHALANX_MM[f.key]/25.4)));
+    out.width = spacing;
+    out.tips = FINGERS.map(f => k[f.tip]);
+  } else {
+    // pouce seul : pouce tendu vers le haut, autres doigts repliés
+    out.extended = dist(wrist,k[4]) > dist(wrist,k[3]) * 1.03 && dist(k[2],k[4]) > dist(k[2],k[3]) * 1.3;
+    out.folded = FINGERS.every(f => dist(wrist,k[f.tip]) < dist(wrist,k[f.mcp]) * 1.25);
+    const dir = [k[4][0]-k[2][0], k[4][1]-k[2][1]]; out.angle = Math.atan2(dir[0], -dir[1]) * 180/Math.PI;
+    out.upright = Math.abs(out.angle) < 45;
+    out.ppi = dist(k[3], k[4]) / (CFG.PHALANX_MM.thumb/25.4);
+    out.width = spacing * 1.2;
+    out.tips = [k[4]];
+  }
+  out.W = W;
+  return out;
+}
+function cropFinger(src, k, f, fingerW, ppi){
+  const tip = k[f.tip], dip = k[f.dip];
+  const dx = tip[0]-dip[0], dy = tip[1]-dip[1]; const L = Math.hypot(dx,dy) || 1; const ux=dx/L, uy=dy/L;
+  const start = [dip[0]-ux*0.15*L, dip[1]-uy*0.15*L], end = [tip[0]+ux*0.55*L, tip[1]+uy*0.55*L];
+  const cx=(start[0]+end[0])/2, cy=(start[1]+end[1])/2; const len = L*1.7;
+  const w = fingerW * (f.key==='pinky' ? 0.85 : f.key==='thumb' ? 1 : 0.98);
+  const scale = CFG.HAND.PPI_TARGET / ppi;
+  const out = newCanvas(w*scale, len*scale); const ctx = out.getContext('2d');
+  ctx.translate(out.width/2, out.height/2); ctx.rotate(-Math.PI/2 - Math.atan2(uy,ux)); ctx.scale(scale,scale); ctx.translate(-cx,-cy);
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(src,0,0);
+  return out;
+}
+function fingerQuality(c){
+  const reg = grayRegion(c, c.width*0.2, c.height*0.12, c.width*0.6, c.height*0.55, 256, 'green');
+  const st = stats(reg.g); const sharp = laplacianVar(reg);
+  const s = clamp(sharp/60,0,1)*55 + clamp(st.std/40,0,1)*25 + (st.glare<0.05?20:st.glare<0.12?10:0) - (st.mean<50||st.mean>225?30:0);
+  const score = Math.round(clamp(s,0,100));
+  return { score, sharp:+sharp.toFixed(1), contrast:+st.std.toFixed(1), glare:+st.glare.toFixed(3), mean:+st.mean.toFixed(0), exploitable: score >= 55 && st.glare < 0.12 };
+}
+function drawHandOverlay(canvas, video, hs, info, good, fingers, sheet, k){
+  const { ctx, P, s } = fitCover(canvas, video.videoWidth, video.videoHeight);
+  if (sheet?.L){
+    ctx.strokeStyle = sheet.ok ? '#3fd08a' : '#f2c14b'; ctx.lineWidth = 3; ctx.setLineDash([10,6]);
+    for (const E of [sheet.L, sheet.R]){
+      const a = sheetToDet(sheet, E.a+E.b*sheet.y0, sheet.y0), b = sheetToDet(sheet, E.a+E.b*sheet.y1, sheet.y1);
+      const [x0,y0] = P(a[0]/k, a[1]/k), [x1,y1] = P(b[0]/k, b[1]/k); ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  for (const h of hs){
+    const k = h.keypoints; if (!k) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2;
+    for (const f of [THUMB, ...FINGERS]){ ctx.beginPath(); for (const i of [0,f.mcp,f.mcp+1,f.dip,f.tip]){ const [x,y]=P(k[i][0],k[i][1]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); } ctx.stroke(); }
+    if (info?.width){
+      for (const f of fingers){
+        const tip=k[f.tip], dip=k[f.dip]; const dx=tip[0]-dip[0], dy=tip[1]-dip[1]; const L=Math.hypot(dx,dy)||1;
+        const cx=(dip[0]+tip[0])/2 + dx/L*0.2*L, cy=(dip[1]+tip[1])/2 + dy/L*0.2*L; const [px,py]=P(cx,cy);
+        ctx.save(); ctx.translate(px,py); ctx.rotate(Math.atan2(dy,dx)+Math.PI/2);
+        ctx.strokeStyle = good ? '#3fd08a' : '#f2c14b'; ctx.lineWidth = 2.5;
+        const w = info.width*s*(f.key==='thumb'?1:0.95), h = L*1.7*s; ctx.strokeRect(-w/2,-h/2,w,h); ctx.restore();
+      }
+    }
+  }
+}
+async function setTorch(stream, on){
+  const tr = stream?.getVideoTracks()[0]; if (!tr?.getCapabilities?.().torch) return false;
+  try { await tr.applyConstraints({ advanced:[{ torch:on }] }); torchOn = on; return true; } catch { return false; }
+}
+/* Feuille blanche de référence : fond uniforme, plan connu, et règle graduée.
+   La distance entre les deux grands bords de la feuille (210 mm pour l'A4) donne l'échelle exacte.
+   La détection travaille le long du grand axe de l'image : bords gauche/droite en paysage,
+   bords haut/bas en portrait (l'image est alors tournée d'un quart de tour avant l'analyse). */
+const sheetCv = document.createElement('canvas');
+function detectSheet(det){
+  const portrait = det.height > det.width;
+  const W = portrait ? det.height : det.width, H = portrait ? det.width : det.height;
+  sheetCv.width = W; sheetCv.height = H; const sctx = sheetCv.getContext('2d', { willReadFrequently:true });
+  sctx.setTransform(1,0,0,1,0,0);
+  if (portrait){ sctx.translate(W,0); sctx.rotate(Math.PI/2); }
+  sctx.drawImage(det,0,0); sctx.setTransform(1,0,0,1,0,0);
+  const d = sctx.getImageData(0,0,W,H).data;
+  const hist = new Uint32Array(256); let tot = 0;
+  for (let i=0;i<d.length;i+=16){ hist[(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])|0]++; tot++; }
+  let acc=0, p95=255; for (let v=0; v<256; v++){ acc+=hist[v]; if (acc >= tot*0.95){ p95=v; break; } }
+  const thr = Math.max(110, p95*0.78);
+  const white = (x,y) => { const i=(y*W+x)*4, r=d[i], g=d[i+1], b=d[i+2]; return (0.299*r+0.587*g+0.114*b) >= thr && Math.max(r,g,b)-Math.min(r,g,b) < 50; };
+  const RUN = Math.max(4, Math.round(W/160)); const rows = []; let scanned = 0;
+  for (let y=Math.round(H*0.05); y<H*0.95; y+=4){
+    scanned++; let xl=-1, xr=-1, run=0;
+    for (let x=0; x<W; x++){ if (white(x,y)){ if (++run >= RUN){ xl = x-RUN+1; break; } } else run=0; }
+    run=0; for (let x=W-1; x>=0; x--){ if (white(x,y)){ if (++run >= RUN){ xr = x+RUN-1; break; } } else run=0; }
+    if (xl >= 0 && xr > xl && (xr-xl) > W*0.5) rows.push([y,xl,xr]);
+  }
+  const out = { ok:false, rows: rows.length, portrait, W, H };
+  if (rows.length < scanned*0.4){ out.reason = 'absente'; return out; }
+  const fit = (pts) => { const n=pts.length; let sy=0,sx=0,syy=0,sxy=0; for (const [y,x] of pts){ sy+=y; sx+=x; syy+=y*y; sxy+=x*y; } const b=(n*sxy-sy*sx)/((n*syy-sy*sy)||1); return { a:(sx-b*sy)/n, b }; };
+  let L = fit(rows.map(r=>[r[0],r[1]])), R = fit(rows.map(r=>[r[0],r[2]]));
+  // la main ou une ombre peut mordre sur un bord : on écarte les lignes aberrantes et on réajuste
+  const keep = rows.filter(r => Math.abs(r[1]-(L.a+L.b*r[0])) < W*0.015 && Math.abs(r[2]-(R.a+R.b*r[0])) < W*0.015);
+  if (keep.length >= rows.length*0.6){ L = fit(keep.map(r=>[r[0],r[1]])); R = fit(keep.map(r=>[r[0],r[2]])); }
+  const y0 = rows[0][0], y1 = rows.at(-1)[0], wAt = (y) => (R.a+R.b*y) - (L.a+L.b*y);
+  const theta = Math.atan((L.b+R.b)/2);
+  Object.assign(out, { L, R, y0, y1, angle: theta*180/Math.PI, parallel: wAt(y0)/wAt(y1), widthPx: wAt((y0+y1)/2)*Math.cos(theta) });
+  out.clipped = (L.a+L.b*y0) <= 3 || (L.a+L.b*y1) <= 3 || (R.a+R.b*y0) >= W-4 || (R.a+R.b*y1) >= W-4;
+  out.reason = out.clipped ? 'coupee' : Math.abs(out.angle) > 12 ? 'inclinee' : Math.abs(1-out.parallel) > 0.08 ? 'perspective' : '';
+  out.ok = !out.reason;
+  return out;
+}
+// coordonnées de l'image d'analyse (éventuellement tournée) → image de détection
+function sheetToDet(s, u, v){ return s.portrait ? [v, s.W - u] : [u, v]; }
+function sheetAdvice(s){
+  const bords = s.portrait ? 'haut et bas' : 'gauche et droit';
+  if (s.reason === 'absente') return [`Posez une feuille blanche ${CFG.SHEET.LABEL}`, s.portrait ? 'Sur une table sombre, en largeur devant vous. Placez-la main dessus, doigts vers le haut de l\'écran.' : 'Sur une table sombre, bords longs à gauche et à droite de l\'image.'];
+  if (s.reason === 'coupee') return ['Éloignez un peu le téléphone', `Les bords ${bords} de la feuille doivent être visibles en entier.`];
+  if (s.reason === 'inclinee') return ['Alignez la feuille', `Ses bords ${bords} doivent être parallèles au cadre de l'écran.`];
+  return ['Tenez le téléphone à plat', 'Parallèle à la feuille, juste au-dessus de la main.'];
+}
+function stepIntro(step){
+  return step.kind === 'quatre'
+    ? [`${step.label}, dos contre la feuille`, 'Paume vers l\'objectif, quatre doigts à plat, tendus et serrés. Tenez le téléphone à plat, de l\'autre main.']
+    : [`${step.label}, ongle contre la feuille`, 'Repliez les autres doigts, pouce à plat pointé vers le haut de l\'écran, pulpe vers l\'objectif.'];
+}
+async function captureHand(step){
+  const video = $('vHand'), ov = $('oHand');
+  const side = step.side, n = step.fingers.length;
+  $('handStep').textContent = `${step.label.toLowerCase()} · tentative ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
+  instr($('handInstr'), ...stepIntro(step));
+  const H = await getHuman();
+  const det = document.createElement('canvas');
+  let stable = 0, prevTips = null;
+  const HC = CFG.HAND;
+  return new Promise((resolve) => {
+    let skip = false; $('b-skipHand').onclick = () => { skip = true; };
+    const loop = async () => {
+      if (!S.streams.length) return resolve(null);
+      if (skip) return resolve({ skipped:true });
+      if (sessionLeft() === 0) return resolve({ error:'session expirée' });
+      const vw = video.videoWidth, vh = video.videoHeight; const k = Math.min(1, HC.DETECT_W / vw);
+      det.width = Math.round(vw*k); det.height = Math.round(vh*k); det.getContext('2d').drawImage(video,0,0,det.width,det.height);
+      let res;
+      try { res = await H.detect(det, { face:{ enabled:false }, hand:{ enabled:true } }); }
+      catch(e){ return resolve({ error:'moteur de détection : '+e.message }); }
+      const hands = (res.hand || []).filter(h => h.score > 0.5).map(h => ({ ...h, keypoints: h.keypoints.map(p=>[p[0]/k, p[1]/k, p[2]||0]) }));
+      const sheet = detectSheet(det);
+      const ppiSheet = sheet.ok ? (sheet.widthPx / k) / CFG.SHEET.WIDTH_MM * 25.4 : null;
+      let A = null, c = {};
+      if (hands.length === 1){ A = handAnalysis(hands[0], vw, step); A.ppiPhalange = A.ppi; if (ppiSheet) A.ppi = ppiSheet; }
+      c.feuille = sheet.ok || !CFG.SHEET.REQUIRED;
+      c.presence = hands.length === 1;
+      c.main = A ? A.thumbSide === side : false;
+      c.doigts = A ? A.extended && A.upright : false;
+      c.resolution = A ? A.ppi >= HC.PPI_MIN && A.ppi <= HC.PPI_MAX : false;
+      c.coherence = A && ppiSheet ? (A.ppiPhalange/ppiSheet > 0.7 && A.ppiPhalange/ppiSheet < 1.4) : false;
+      let moved = 1;
+      if (A && prevTips){ moved = Math.max(...A.tips.map((p,i)=>dist(p,prevTips[i])))/vw; }
+      prevTips = A ? A.tips : null;
+      c.stable = moved < HC.MOVE_MAX;
+      // Quatre doigts : la bonne main est exigée. Pouce : la position du poing rend ce contrôle indicatif.
+      const all = c.feuille && c.presence && (step.kind === 'pouce' || c.main) && c.doigts && c.resolution && c.stable;
+      stable = all ? stable+1 : 0;
+      const ppiChip = [`${A?Math.round(A.ppi):'—'} ppi`, !A?'':(A.ppi>=HC.PPI_TARGET?'ok':(c.resolution?'warn':'ko'))];
+      const sheetChip = [`feuille ${CFG.SHEET.LABEL}`, sheet.ok?'ok':'ko'];
+      chips($('handChips'), step.kind === 'quatre'
+        ? [sheetChip, ['une main', c.presence?'ok':'ko'], [`main ${side} · paume`, c.main?'ok':'ko'], ['doigts tendus', c.doigts?'ok':'warn'], ppiChip, ['échelle cohérente', c.coherence?'ok':'warn'], ['stable', c.stable?'ok':'warn']]
+        : [sheetChip, ['une main', c.presence?'ok':'ko'], ['pouce tendu', c.doigts?'ok':'warn'], ['autres doigts repliés', A?.folded?'ok':'warn'], ppiChip, ['stable', c.stable?'ok':'warn']]);
+      $('handMetrics').innerHTML = (sheet.rows ? `feuille : inclinaison <b>${(sheet.angle??0).toFixed(1)}°</b> parallélisme <b>${(sheet.parallel??0).toFixed(3)}</b> ` : '') + (A ? `résolution <b>${Math.round(A.ppi)} ppi</b> (phalange <b>${Math.round(A.ppiPhalange)}</b>) ` : '') + `vidéo <b>${vw}×${vh}</b> torche <b>${torchOn?'oui':'non'}</b>`;
+      if (!sheet.ok && CFG.SHEET.REQUIRED) instr($('handInstr'), ...sheetAdvice(sheet), sheet.reason==='absente' ? '' : 'alert');
+      else if (hands.length > 1) instr($('handInstr'),'Une seule main','Retirez l\'autre main du champ.','alert');
+      else if (!A) instr($('handInstr'), ...stepIntro(step));
+      else if (step.kind === 'quatre' && !c.main) instr($('handInstr'), 'Vérifiez la main présentée', `Posez la main ${side}, dos contre la feuille, paume vers l'objectif.`, 'alert');
+      else if (!c.doigts) step.kind === 'quatre' ? instr($('handInstr'), 'Tendez les doigts', 'Doigts à plat, droits, serrés, pointés vers le haut de l\'écran.') : instr($('handInstr'), 'Tendez le pouce', 'Pouce à plat, ongle contre la feuille, pointé vers le haut de l\'écran.');
+      else if (A.ppi < HC.PPI_MIN) instr($('handInstr'), 'Rapprochez le téléphone', 'Les deux grands bords de la feuille doivent rester visibles, au plus près.');
+      else if (A.ppi > HC.PPI_MAX) instr($('handInstr'), 'Éloignez le téléphone', 'Trop près : la mise au point devient impossible.');
+      else if (!c.stable) instr($('handInstr'), 'Ne bougez plus', 'Laissez la main posée, immobile.');
+      else instr($('handInstr'), 'Ne bougez plus', 'Capture en cours…', 'good');
+      drawHandOverlay(ov, video, hands, A, all, step.fingers, sheet, k);
+
+      if (stable >= HC.STABLE_FRAMES){
+        const frame = frameOf(video, true);
+        const kp = hands[0].keypoints;
+        const fingers = step.fingers.map(f => {
+          const crop = cropFinger(frame, kp, f, A.width, A.ppi);
+          return { finger: f, code: f.code[side], crop: toGray(crop), enhanced: ridgeEnhance(crop), q: fingerQuality(crop) };
+        });
+        const good = fingers.filter(x=>x.q.exploitable).length;
+        log(`${step.label.toLowerCase()} : capture ${vw}×${vh}, ${Math.round(A.ppi)} ppi mesurés sur la feuille (phalange ${Math.round(A.ppiPhalange)}), ${good}/${n} exploitable(s) (${fingers.map(x=>x.q.score).join('/')})`);
+        return resolve({ fingers, ppi: A.ppi, ppiPhalange: A.ppiPhalange, sheet: { angle: +sheet.angle.toFixed(2), parallelisme: +sheet.parallel.toFixed(3) }, good, frameSize:[vw,vh] });
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+}
+async function runFingers(){
+  show('s-doigts');
+  const video = $('vHand');
+  const facing = S.env.rear?.present ? 'environment' : 'user';
+  try { await openCamera(video, facing, 3840, 2160); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
+  $('handLoading').hidden = true;
+  const stream = S.streams.at(-1);
+  const tcap = stream.getVideoTracks()[0].getCapabilities?.() || {};
+  if (tcap.torch){ $('b-torch').hidden = false; await setTorch(stream, true); $('b-torch').onclick = () => setTorch(stream, !torchOn); }
+  if (Array.isArray(tcap.focusMode) && tcap.focusMode.includes('continuous')){ try { await stream.getVideoTracks()[0].applyConstraints({ advanced:[{ focusMode:'continuous' }] }); } catch {} }
+  log(`caméra ${facing==='environment'?'arrière':'frontale (démonstration)'} ${video.videoWidth}×${video.videoHeight}, torche ${torchOn}`);
+  for (const step of STEPS){
+    const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
+    while (true){
+      $('b-skipHand').hidden = S.hands.attempts[step.id] < 1;
+      const r = await captureHand(step);
+      if (!r) return false;
+      if (r.error){ log('empreintes : '+r.error); stopStreams(); return false; }
+      if (r.skipped){ log(`${step.label.toLowerCase()} : prise ignorée par l'électeur`); break; }
+      if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} capturé${step.kind==='quatre'?'e':''}`, n > 1 ? `${r.good} doigts exploitables sur ${n}.` : 'Empreinte exploitable.', 'good'); await new Promise(x=>setTimeout(x,900)); break; }
+      S.hands.attempts[step.id]++;
+      if (S.hands.attempts[step.id] >= CFG.MAX_ATTEMPTS){ log(`${step.label.toLowerCase()} : tentatives épuisées`); break; }
+      instr($('handInstr'), 'Empreintes peu lisibles', `${r.good} exploitable(s) sur ${n}. Essuyez vos doigts, activez la torche et recommencez.`, 'alert');
+      await new Promise(x=>setTimeout(x,2200));
+    }
+  }
+  stopStreams();
+  return true;
+}
+
+/* ---------------------------------------------------------------------
+   Étape 4 — revue
+   --------------------------------------------------------------------- */
+function thumbHtml(id, label, q, cls){ return `<div class="thumb ${cls}"><div id="${id}"></div><div class="q"><span>${label}</span><b>${q}</b></div></div>`; }
+function mount(id, canvas){ const el = $(id); const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; c.getContext('2d').drawImage(canvas,0,0); S.canvases.push(c); el.appendChild(c); }
+function renderReview(){
+  show('s-revue');
+  const fr = S.face.reference;
+  $('faceThumbs').innerHTML = thumbHtml('ft0','référence', `IED ${fr.metrics.ied.toFixed(0)}`, 'ok') + S.face.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('');
+  mount('ft0', fr.token); S.face.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+  const blocks = [];
+  for (const st of STEPS.filter(s => s.kind === 'quatre')){
+    const h = S.hands[st.id];
+    if (!h){ blocks.push(`<p class="note">${st.label} : non capturée.</p>`); continue; }
+    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi estimés · ${h.good}/4 exploitables</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, f.q.score, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
+  }
+  const thumbs = STEPS.filter(s => s.kind === 'pouce');
+  blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">Pouces</span><div class="grid">${thumbs.map(st => { const h = S.hands[st.id]; return h ? thumbHtml(`fp-${st.id}-0`, st.side==='droite'?'droit':'gauche', h.fingers[0].q.score, h.fingers[0].q.exploitable?'ok':'ko') : `<div class="thumb ko"><div class="q"><span>${st.side==='droite'?'droit':'gauche'}</span><b>—</b></div>non capturé</div>`; }).join('')}</div></div>`);
+  $('fingerThumbs').innerHTML = blocks.join('');
+  $('fingerBlock').hidden = !S.fingerEnabled;
+  for (const st of STEPS) S.hands[st.id]?.fingers.forEach((f,i)=>mount(`fp-${st.id}-${i}`, f.enhanced));
+}
+
+/* ---------------------------------------------------------------------
+   Chiffrement : ECDH P-256 éphémère + HKDF-SHA-256 + AES-256-GCM
+   (schéma équivalent à HPKE, RFC 9180) ; signature ECDSA du terminal
+   --------------------------------------------------------------------- */
+async function seal(){
+  const sess = S.session; const images = [];
+  const addImg = async (role, canvas, type, q, meta) => {
+    const bytes = await canvasBytes(canvas, type, q);
+    images.push({ role, type, w: canvas.width, h: canvas.height, sha256: await sha256(bytes), size: bytes.length, ...meta, _bytes: bytes });
+  };
+  await addImg('visage.reference', S.face.reference.token, 'image/jpeg', 0.92, { format:'ISO/IEC 39794-5 token frontal' });
+  for (const c of S.face.challenge) await addImg('visage.defi.'+c.action, c.frame, 'image/jpeg', 0.85, { t_ms:c.t_ms });
+  for (const st of STEPS) for (const f of (S.hands[st.id]?.fingers || []))
+    await addImg('empreinte.'+f.code, f.crop, 'image/png', undefined, { position_iso: f.code, doigt: `${f.finger.fr} ${st.side==='droite'?'droit':'gauche'}`, ppi: 500, qualite: f.q });
+  const m = S.face.reference.metrics;
+  const manifest = {
+    version: 'capture/1.0',
+    session: { id: sess.id, nonce: sess.nonce, cle_serveur: sess.serverKid, horodatage: new Date().toISOString() },
+    electeur: { npi: sess.npi },
+    terminal: { plateforme: 'web-prototype', webdriver: S.env.webdriver, cameras: S.env.cameras, camera_virtuelle: S.env.virtualCamera, camera_active: S.env.activeLabel, arriere: S.env.rear, attestation: 'SIMULEE' },
+    visage: {
+      qualite_reference: { ied_px: +m.ied.toFixed(1), lacet_deg: +m.yaw.toFixed(1), tangage_deg: +m.pitch.toFixed(1), roulis_deg: +m.roll.toFixed(1), luminance: +m.luma.toFixed(0), equilibre: +m.balance.toFixed(2), nettete: +m.sharp.toFixed(1) },
+      defi: { demande: sess.challenge, realise: S.face.challenge.map(c=>({ action:c.action, t_ms:c.t_ms })) },
+      pad_passif_indicatif: S.face.padSummary,
+      tentatives: S.face.attempts + 1,
+    },
+    empreintes: STEPS.map(st => S.hands[st.id] ? { prise: st.label, ppi_feuille: Math.round(S.hands[st.id].ppi), ppi_phalange: Math.round(S.hands[st.id].ppiPhalange||0), feuille: S.hands[st.id].sheet, exploitables: S.hands[st.id].good, sur: st.fingers.length, tentatives: S.hands.attempts[st.id]+1 } : { prise: st.label, capturee: false }),
+    images: images.map(({_bytes, ...rest}) => rest),
+  };
+  // Charge utile : manifeste + images (base64 ici ; CBOR binaire en natif)
+  const payload = { manifest, data: Object.fromEntries(images.map(i => [i.role, btoa(Array.from(i._bytes, b=>String.fromCharCode(b)).join(''))])) };
+  const plain = enc.encode(JSON.stringify(payload)); S.buffers.push(plain);
+  const aad = enc.encode(`${sess.id}|${sess.nonce}|${sess.serverKid}`);
+  const eph = await crypto.subtle.generateKey({ name:'ECDH', namedCurve:'P-256' }, true, ['deriveBits']);
+  const shared = await crypto.subtle.deriveBits({ name:'ECDH', public: S.server.publicKey }, eph.privateKey, 256);
+  const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  const salt = Uint8Array.from(atob(sess.nonce.replace(/-/g,'+').replace(/_/g,'/') + '='.repeat((4 - sess.nonce.length % 4) % 4)), ch=>ch.charCodeAt(0));
+  const key = await crypto.subtle.deriveKey({ name:'HKDF', hash:'SHA-256', salt, info: enc.encode('vote-distance/capture/v1') }, ikm, { name:'AES-GCM', length:256 }, false, ['encrypt']);
+  const iv = rnd(12);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv, additionalData: aad }, key, plain));
+  const sig = await crypto.subtle.sign({ name:'ECDSA', hash:'SHA-256' }, S.device.privateKey, ct);
+  const epk = await crypto.subtle.exportKey('jwk', eph.publicKey);
+  S.sealed = { ct, iv, aad, epk, sig, plainSize: plain.length, manifest };
+  log(`paquet chiffré — ${images.length} images, ${plain.length} octets en clair, ${ct.length} octets chiffrés`);
+  plain.fill(0);
+  renderEnvelope();
+}
+async function renderEnvelope(){
+  show('s-envoi');
+  const s = S.sealed;
+  const rows = [
+    ['session', S.session.id], ['clé destinataire', S.session.serverKid], ['algorithme', 'ECDH-P256 + HKDF-SHA256 + AES-256-GCM'],
+    ['clé éphémère', `${s.epk.x.slice(0,16)}…`], ['vecteur init.', b64u(s.iv)], ['données associées', 'session | nonce | clé'],
+    ['taille chiffrée', `${(s.ct.length/1024).toFixed(0)} Ko`], ['empreinte SHA-256', (await sha256(s.ct)).slice(0,32)+'…'],
+    ['signature terminal', `ECDSA-P256 · ${b64u(s.sig).slice(0,20)}…`],
+  ];
+  $('envelope').innerHTML = rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('');
+  $('manifest').textContent = JSON.stringify(s.manifest, null, 2);
+}
+
+// Service d'authentification simulé : vérifie la signature, déchiffre, contrôle le nonce
+async function simulatedServer(env){
+  const ok = await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, S.device.publicKey, env.sig, env.ct);
+  if (!ok) return { statut:'REJETE', motif:'signature du terminal invalide' };
+  const epk = await crypto.subtle.importKey('jwk', env.epk, { name:'ECDH', namedCurve:'P-256' }, false, []);
+  const shared = await crypto.subtle.deriveBits({ name:'ECDH', public: epk }, S.server.privateKey, 256);
+  const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  const n = S.session.nonce; const salt = Uint8Array.from(atob(n.replace(/-/g,'+').replace(/_/g,'/') + '='.repeat((4 - n.length % 4) % 4)), ch=>ch.charCodeAt(0));
+  const key = await crypto.subtle.deriveKey({ name:'HKDF', hash:'SHA-256', salt, info: enc.encode('vote-distance/capture/v1') }, ikm, { name:'AES-GCM', length:256 }, false, ['decrypt']);
+  let plain; try { plain = new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv: env.iv, additionalData: env.aad }, key, env.ct)); } catch { return { statut:'REJETE', motif:'déchiffrement impossible' }; }
+  const p = JSON.parse(new TextDecoder().decode(plain)); plain.fill(0);
+  if (p.manifest.session.nonce !== S.session.nonce) return { statut:'REJETE', motif:'nonce inconnu ou déjà utilisé' };
+  if (Date.now() > S.session.expires) return { statut:'REJETE', motif:'session expirée' };
+  for (const img of p.manifest.images){ const bytes = Uint8Array.from(atob(p.data[img.role]), c=>c.charCodeAt(0)); if (await sha256(bytes) !== img.sha256) return { statut:'REJETE', motif:'intégrité d\'une image' }; bytes.fill(0); }
+  return { statut:'RECU', images: p.manifest.images.length, verification: 'Signature, nonce, délai et intégrité des images vérifiés.', comparaison: 'Comparaison au RNPP : hors du périmètre du prototype.' };
+}
+
+/* ---------------------------------------------------------------------
+   Effacement
+   --------------------------------------------------------------------- */
+function wipe(){
+  const lines = [];
+  let px = 0; for (const c of S.canvases){ px += c.width*c.height; const ctx = c.getContext('2d'); ctx?.clearRect(0,0,c.width,c.height); c.width = 0; c.height = 0; }
+  lines.push(`${S.canvases.length} tampons d'image remis à zéro (${(px/1e6).toFixed(1)} Mpx)`);
+  let bytes = 0; for (const b of S.buffers){ bytes += b.length; b.fill(0); } lines.push(`${S.buffers.length} tampons binaires écrasés (${(bytes/1024).toFixed(0)} Ko)`);
+  if (S.sealed){ S.sealed.ct.fill(0); lines.push('paquet chiffré écrasé après accusé de réception'); }
+  stopStreams(); lines.push('flux caméra arrêtés');
+  S.canvases = []; S.buffers = []; S.face.reference = null; S.face.challenge = []; for (const st of STEPS) S.hands[st.id] = null; S.sealed = null; S.session.nonce = null;
+  lines.push('nonce de session invalidé — aucune image n\'a été écrite sur le stockage');
+  document.querySelectorAll('#faceThumbs,#fingerThumbs').forEach(e=>e.innerHTML='');
+  log('effacement terminé');
+  return lines;
+}
+
+/* ---------------------------------------------------------------------
+   Enchaînement
+   --------------------------------------------------------------------- */
+$('b-start').onclick = async () => {
+  const npi = $('npi').value.trim();
+  if (!/^\d{10}$/.test(npi)){ $('npi').setCustomValidity('Le NPI comporte 10 chiffres.'); $('npi').reportValidity(); return; }
+  $('npi').setCustomValidity('');
+  await openSession(npi);
+  show('s-terminal');
+  $('sessionInfo').innerHTML = `<span>session <b>${S.session.id.slice(0,8)}</b></span><span>nonce <b>${S.session.nonce.slice(0,10)}…</b></span><span>expire dans <b>${CFG.SESSION_TTL_S} s</b></span>`;
+  getHuman().catch(e => log('chargement des modèles impossible : '+e.message));
+  await checkTerminal();
+};
+$('forceFinger').onchange = (e) => { S.fingerEnabled = e.target.checked; };
+$('b-toFace').onclick = async () => {
+  const ok = await runFace();
+  if (!ok){ $('b-faceCancel').textContent = 'Terminer'; return; }
+  if (S.fingerEnabled){ await runFingers(); }
+  renderReview();
+};
+$('b-faceCancel').onclick = () => { stopStreams(); log('capture du visage abandonnée'); location.reload(); };
+$('b-handCancel').onclick = () => { stopStreams(); log('capture des empreintes abandonnée'); location.reload(); };
+$('b-restart').onclick = () => location.reload();
+$('b-seal').onclick = async () => { $('b-seal').disabled = true; await seal(); };
+$('b-send').onclick = async () => {
+  $('b-send').disabled = true;
+  const r = await simulatedServer(S.sealed);
+  const el = $('result'); el.hidden = false; el.className = 'result' + (r.statut==='RECU'?'':' ko');
+  el.innerHTML = r.statut==='RECU' ? `<strong>Reçu par le service d'authentification (simulé)</strong><br>${r.verification}<br>${r.comparaison}` : `<strong>Rejeté</strong> — ${r.motif}`;
+  log(`réponse du service : ${r.statut}${r.motif?' — '+r.motif:''}`);
+  $('wipeBlock').hidden = false; $('wipeLog').textContent = wipe().join('\n');
+  $('b-new').hidden = false;
+};
+$('b-new').onclick = () => location.reload();
+// Accès de test (ouvrir la page avec #debug)
+if (location.hash === '#debug') window.__proto = { S, CFG, FINGERS, THUMB, STEPS, handAnalysis, detectSheet, openSession, cropFinger, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+log('prototype chargé');
+</script>
+</body>
+</html>
