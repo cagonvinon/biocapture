@@ -82,7 +82,8 @@ input[type=text]:focus-visible,button:focus-visible{outline:3px solid color-mix(
 .loading{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;color:#c6d4cc;font-size:14px}
 
 /* Revue */
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.overview{width:100%;height:auto;border-radius:6px;display:block}
 .thumb{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px;display:grid;gap:4px;font:11px/1.3 var(--mono);color:var(--muted)}
 .thumb canvas,.thumb img{width:100%;height:auto;display:block;border-radius:3px;background:#222}
 .thumb .q{display:flex;justify-content:space-between;gap:4px}
@@ -107,6 +108,7 @@ details summary{cursor:pointer;font-weight:500}
 <!-- 0. ACCUEIL -->
 <main class="screen" id="s-accueil">
   <span class="badge">Prototype de démonstration — aucune donnée transmise</span>
+  <span class="hint" id="version"></span>
   <div style="display:grid;gap:8px">
     <span class="eyebrow">République du Bénin · Vote à distance</span>
     <h1 style="font-size:26px">Module de capture biométrique</h1>
@@ -188,6 +190,7 @@ details summary{cursor:pointer;font-weight:500}
   <section class="block" id="fingerBlock">
     <h3>Empreintes à 500 ppi et minuties extraites</h3>
     <div id="fingerThumbs" style="display:grid;gap:10px"></div>
+    <details><summary>Journal de la session</summary><div class="log" id="journalRevue"></div></details>
     <p class="note">Échelle mesurée sur la largeur de la feuille A4 (210 mm). Cercles rouges : terminaisons ; cercles bleus : bifurcations ; « m. » : nombre de minuties. Le serveur refait sa propre extraction.</p>
   </section>
   <div class="spacer"></div>
@@ -225,7 +228,7 @@ import Human, { match } from 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3
 
 const CFG = {
   MODELS: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
-  SESSION_TTL_S: 300,          // durée de vie d'une session (nonce)
+  SESSION_TTL_S: 600,          // durée de vie d'une session (nonce) : acquisition complète visage + 10 doigts
   MAX_ATTEMPTS: 3,             // tentatives par modalité
   FACE: {
     IED_MIN: 90,               // distance inter-pupillaire minimale (px) — ISO/IEC 39794-5 / ICAO
@@ -751,7 +754,8 @@ function cropFinger(src, k, f, fingerW, ppi){
   const start = [dip[0]-ux*0.15*L, dip[1]-uy*0.15*L], end = [tip[0]+ux*0.55*L, tip[1]+uy*0.55*L];
   const cx=(start[0]+end[0])/2, cy=(start[1]+end[1])/2; const len = L*1.7;
   const w = fingerW * (f.key==='pinky' ? 0.85 : f.key==='thumb' ? 1 : 0.98);
-  const scale = CFG.HAND.PPI_TARGET / ppi;
+  if (!Number.isFinite(ppi) || ppi < 80 || !Number.isFinite(fingerW) || fingerW <= 0) throw new Error(`échelle aberrante (${Math.round(ppi)} ppi, largeur ${Math.round(fingerW)} px)`);
+  const scale = Math.min(CFG.HAND.PPI_TARGET / ppi, 4);
   const out = newCanvas(w*scale, len*scale); const ctx = out.getContext('2d');
   ctx.translate(out.width/2, out.height/2); ctx.rotate(-Math.PI/2 - Math.atan2(uy,ux)); ctx.scale(scale,scale); ctx.translate(-cx,-cy);
   ctx.imageSmoothingQuality = 'high'; ctx.drawImage(src,0,0);
@@ -868,7 +872,7 @@ function sheetAdvice(s){
 const REASON_FR = { absente:'non trouvée', sens:'mal orientée', entiere:'trop loin', coupee:'coupée', inclinee:'inclinée', perspective:'téléphone penché', '':'détectée' };
 function stepIntro(step){
   return step.kind === 'quatre'
-    ? [`${step.label}, dos contre la feuille`, 'Paume vers l\'objectif, quatre doigts à plat, tendus et serrés. Tenez le téléphone à plat, de l\'autre main.']
+    ? [`${step.label}, dos contre la feuille`, 'Main posée sur la feuille blanche, paume vers l\'objectif, quatre doigts tendus et serrés vers le haut de l\'écran.']
     : [`${step.label}, ongle contre la feuille`, 'Repliez les autres doigts, pouce à plat pointé vers le haut de l\'écran, pulpe vers l\'objectif.'];
 }
 function rotate90(src, dir){
@@ -897,6 +901,11 @@ async function captureStill(video, step, preview){
   let img = null, source = 'vidéo', an = null;
   if (window.ImageCapture && track){
     try {
+      const tips = preview.A?.tips || []; const vw = video.videoWidth, vh = video.videoHeight;
+      if (tips.length && track.getCapabilities?.().pointsOfInterest !== undefined){
+        const cx = tips.reduce((a,p)=>a+p[0],0)/tips.length/vw, cy = tips.reduce((a,p)=>a+p[1],0)/tips.length/vh;
+        try { await track.applyConstraints({ advanced:[{ pointsOfInterest:[{ x:cx, y:cy }] }] }); await new Promise(r=>setTimeout(r,500)); } catch {}
+      }
       const blob = await new ImageCapture(track).takePhoto();
       const bmp = await createImageBitmap(blob, { imageOrientation:'from-image' });
       img = newCanvas(bmp.width, bmp.height); img.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.();
@@ -920,10 +929,18 @@ async function captureStill(video, step, preview){
     q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.exploitable = q.exploitable && ext.count >= CFG.HAND.MIN_MINUTIAE;
     return { finger: f, code: f.code[step.side], crop: gray, enhanced: ridgeEnhance(crop), q, ext };
   });
+  const ow = Math.min(480, img.width), ok_ = ow/img.width; const overview = newCanvas(ow, img.height*ok_); const octx = overview.getContext('2d');
+  octx.drawImage(img, 0, 0, overview.width, overview.height);
+  for (const f of step.fingers){ const tip = an.kp[f.tip], dip = an.kp[f.dip]; const dx = tip[0]-dip[0], dy = tip[1]-dip[1], L = Math.hypot(dx,dy)||1;
+    const cx = (dip[0]-dx/L*0.15*L + tip[0]+dx/L*0.55*L)/2, cy = (dip[1]-dy/L*0.15*L + tip[1]+dy/L*0.55*L)/2;
+    octx.save(); octx.translate(cx*ok_, cy*ok_); octx.rotate(Math.atan2(dy,dx)+Math.PI/2); octx.strokeStyle = '#3fd08a'; octx.lineWidth = 2;
+    const w = an.A.width*(f.key==='pinky'?0.85:f.key==='thumb'?1:0.98)*ok_, h = L*1.7*ok_; octx.strokeRect(-w/2,-h/2,w,h); octx.restore(); }
+  if (an.sheet?.use?.L){ octx.strokeStyle = '#f2c14b'; octx.setLineDash([6,4]); const sc = an.sheet.use, kk = an.k || 1;
+    for (const E of [sc.L, sc.R]){ const a = sheetToDet(sc, E.a+E.b*sc.v0, sc.v0), b = sheetToDet(sc, E.a+E.b*sc.v1, sc.v1); octx.beginPath(); octx.moveTo(a[0]/kk*ok_, a[1]/kk*ok_); octx.lineTo(b[0]/kk*ok_, b[1]/kk*ok_); octx.stroke(); } octx.setLineDash([]); }
   const good = fingers.filter(x=>x.q.exploitable).length;
   const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push('résolution insuffisante'); if (scale === 'phalange') flags.push('échelle estimée');
   log(`${step.label.toLowerCase()} : ${source} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (${scale}), ${good}/${fingers.length} exploitable(s) (${fingers.map(x=>x.q.score).join('/')})${flags.length ? ' — ' + flags.join(', ') : ''}`);
-  return { fingers, ppi, ppiPhalange: an.A.ppi, scale, source, flags, good, frameSize:[img.width, img.height], sheet: an.sheet?.use ? { angle: +an.sheet.angle.toFixed(2), parallelisme: +an.sheet.parallel.toFixed(3) } : null };
+  return { fingers, overview, ppi, ppiPhalange: an.A.ppi, scale, source, flags, good, frameSize:[img.width, img.height], sheet: an.sheet?.use ? { angle: +an.sheet.angle.toFixed(2), parallelisme: +an.sheet.parallel.toFixed(3) } : null };
 }
 
 async function captureHand(step){
@@ -935,7 +952,7 @@ async function captureHand(step){
   const H = await getHuman();
   const det = document.createElement('canvas');
   const HC = CFG.HAND, N = HC.WINDOW;
-  const W = { feuille:new Win(N), proche:new Win(N), presence:new Win(N), main:new Win(N), doigts:new Win(N), stable:new Win(N), all:new Win(N) };
+  const W = { feuille:new Win(N), presence:new Win(N), main:new Win(N), doigts:new Win(N), stable:new Win(N), resolution:new Win(N), all:new Win(N) };
   let prevTips = null, nanFrames = 0, manual = false, last = null;
   const tStart = performance.now();
   return new Promise((resolve) => {
@@ -971,18 +988,22 @@ async function captureHand(step){
       prevTips = A ? A.tips : null;
       const c = {
         feuille: sheet.ok || !CFG.SHEET.REQUIRED,
-        proche: sheet.ok && fill >= HC.FILL_MIN,
         presence: hands.length === 1,
         main: !!A && (step.kind === 'pouce' || A.thumbSide === side),
         doigts: !!A && A.extended && A.upright,
         stable: moved < HC.MOVE_MAX,
       };
-      c.all = c.feuille && c.proche && c.presence && c.doigts && c.stable;   // la main (droite/gauche) reste indicative
+      // Résolution attendue sur la photo : la photo est plus définie que la vidéo d'aperçu
+      const vLong = Math.max(vw, vh), photoFactor = Math.max(1, (S.env.rear?.photoMax || vLong) / vLong);
+      const ppiPhoto = A ? (ppiSheet || A.ppi) * photoFactor : null;
+      c.resolution = !!A && ppiPhoto >= HC.PPI_MIN * 0.85;
+      // déclenchement : une main, doigts tendus, immobile, assez près. La feuille aide (échelle) mais ne bloque pas.
+      c.all = c.presence && c.doigts && c.stable && c.resolution;
       for (const key of Object.keys(W)) W[key].push(c[key]);
       const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
       const ppiNow = A ? (ppiSheet || A.ppi) : null;
       chips($('handChips'), [
-        [`feuille ${CFG.SHEET.LABEL}`, ck('feuille','ko')], ['assez près', ck('proche')], ['une main', ck('presence','ko')],
+        [`feuille ${CFG.SHEET.LABEL}`, ck('feuille')], [`≈ ${ppiPhoto ? Math.round(ppiPhoto) : '—'} ppi`, ck('resolution')], ['une main', ck('presence','ko')],
         step.kind === 'quatre' ? [`main ${side}`, ck('main')] : ['autres doigts repliés', A?.folded ? 'ok' : 'warn'],
         [step.kind === 'quatre' ? 'doigts tendus' : 'pouce tendu', ck('doigts')], ['stable', ck('stable')] ]);
       const pct = (x) => Math.round(x*100);
@@ -993,13 +1014,12 @@ async function captureHand(step){
       if (last && performance.now() - tStart > HC.MANUAL_AFTER_MS) $('b-handShot').hidden = false;
 
       if (nanFrames >= 20) adv.set('Calcul invalide sur ce téléphone', 'Touchez « Changer de moteur » en bas de l\'écran.', 'alert');
-      else if (!W.feuille.ok(0.5) && CFG.SHEET.REQUIRED) adv.set(...sheetAdvice(sheet), sheet.reason === 'absente' ? '' : 'alert');
-      else if (!W.proche.ok(0.5)) adv.set('Rapprochez le téléphone', `La feuille doit occuper presque toute la ${sheet.portrait ? 'hauteur' : 'largeur'} de l'écran, ses deux grands bords restant visibles.`);
       else if (hands.length > 1) adv.set('Une seule main', 'Retirez l\'autre main du champ.', 'alert');
       else if (!W.presence.ok(0.5)) adv.set(...stepIntro(step));
       else if (!W.doigts.ok(0.5)) step.kind === 'quatre' ? adv.set('Tendez les doigts', 'Doigts à plat, droits, serrés, pointés vers le haut de l\'écran.') : adv.set('Tendez le pouce', 'Pouce à plat, ongle contre la feuille, pointé vers le haut de l\'écran.');
       else if (step.kind === 'quatre' && !W.main.ok(0.5)) adv.set('Vérifiez la main', `Main ${side}, dos contre la feuille, paume vers l'objectif.`, 'alert');
-      else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Laissez la main posée, immobile.');
+      else if (!W.resolution.ok(0.5)) adv.set('Rapprochez le téléphone', 'Les doigts doivent occuper une bonne partie de l\'écran.');
+      else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Laissez la main posée, immobile, téléphone stable.');
       else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
       drawHandOverlay(ov, video, hands, A, W.all.ok(HC.AUTO_RATIO), step.fingers, sheet, k);
 
@@ -1008,7 +1028,7 @@ async function captureHand(step){
         adv.force('Capture en cours…', 'Ne bougez pas, la photo est prise en pleine résolution.', 'good');
         $('b-handShot').hidden = true;
         try { const r = await captureStill(video, step, A ? { kp: hands[0].keypoints, A, sheet, ppiSheet } : last); r.mode = mode; return resolve(r); }
-        catch(e){ log('capture impossible : ' + e.message); manual = false; W.all.reset(); }
+        catch(e){ log(`${step.label.toLowerCase()} : capture impossible — ${e.message}`); (S.handStatus ||= {})[step.id] = 'dernière capture impossible : ' + e.message; adv.force('La photo n\'a pas pu être traitée', e.message + '. Nouvelle tentative.', 'alert'); manual = false; W.all.reset(); }
       }
       requestAnimationFrame(loop);
     };
@@ -1031,7 +1051,7 @@ async function runFingers(){
     while (true){
       const r = await captureHand(step);
       if (!r) return false;
-      if (r.error){ log('empreintes : '+r.error); stopStreams(); return false; }
+      if (r.error){ log('empreintes : '+r.error); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = r.error; stopStreams(); return false; }
       if (r.exception){ S.hands[step.id] = { exception: r.exception, fingers: [], good: 0, ppi: 0 }; log(`${step.label.toLowerCase()} : exception déclarée — ${r.exception}`); break; }
       if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} : prise enregistrée`, (n > 1 ? `${r.good} doigts exploitables sur ${n}` : 'Empreinte exploitable') + ` · ${Math.round(r.ppi)} ppi.`, 'good'); await new Promise(x=>setTimeout(x,1500)); break; }
       S.hands.attempts[step.id]++;
@@ -1097,9 +1117,11 @@ function extractMinutiae(gray){
   return { minutiae: list, count: list.length, area_mm2: +area.toFixed(1) };
 }
 function drawMinutiae(canvas, ext){
-  const ctx = canvas.getContext('2d'); ctx.lineWidth = 2;
-  for (const m of ext.minutiae){ ctx.strokeStyle = m.t === 'T' ? '#e5484d' : '#2f7fe0'; ctx.beginPath(); ctx.arc(m.x, m.y, 5, 0, Math.PI*2); ctx.stroke();
-    const r = m.a*Math.PI/180; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(m.x + 10*Math.cos(r), m.y + 10*Math.sin(r)); ctx.stroke(); }
+  // tracé proportionnel à l'image, pour rester lisible une fois la vignette réduite à l'écran
+  const ctx = canvas.getContext('2d'); const u = Math.max(2, canvas.width/45); ctx.lineWidth = Math.max(1.5, u/2.5);
+  for (const m of ext.minutiae){ ctx.strokeStyle = m.t === 'T' ? '#ff3b3b' : '#2f8cff'; ctx.beginPath(); ctx.arc(m.x, m.y, u*1.4, 0, Math.PI*2); ctx.stroke();
+    const r = m.a*Math.PI/180; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(m.x + u*3*Math.cos(r), m.y + u*3*Math.sin(r)); ctx.stroke(); }
+  if (!ext.count){ ctx.fillStyle = 'rgba(179,38,30,.85)'; ctx.fillRect(0, canvas.height-u*7, canvas.width, u*7); ctx.fillStyle = '#fff'; ctx.font = `${Math.round(u*3.4)}px sans-serif`; ctx.fillText('aucune minutie', u*1.5, canvas.height-u*2.2); }
 }
 async function faceEmbedding(img){
   const H = await getHuman();
@@ -1118,17 +1140,26 @@ function renderReview(){
   const fr = S.face.reference;
   $('faceThumbs').innerHTML = thumbHtml('ft0','référence', `IED ${fr.metrics.ied.toFixed(0)}`, 'ok') + S.face.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('');
   mount('ft0', fr.token); S.face.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
-  const blocks = [];
-  for (const st of STEPS.filter(s => s.kind === 'quatre')){
+  // État de chaque prise, toujours affiché : capturée, exception, ou absente avec la raison connue
+  const statusRow = (st) => { const h = S.hands[st.id], n = S.hands.attempts[st.id];
+    const etat = !h ? `non capturée — ${S.handStatus?.[st.id] || 'aucune prise enregistrée'}` : h.exception ? `exception : ${h.exception}` : `${h.fingers.length} image(s), ${h.good} exploitable(s), ${Math.round(h.ppi)} ppi, ${h.source}, capture ${h.mode || '—'}`;
+    return `<tr><td>${st.label}</td><td>${etat}</td><td>${n + (h && !h.exception ? 1 : 0)}</td></tr>`; };
+  const html = [`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)"><thead><tr><th align="left">Prise</th><th align="left">État</th><th align="left">Essais</th></tr></thead><tbody>${STEPS.map(statusRow).join('')}</tbody></table></div>`];
+  for (const st of STEPS){
     const h = S.hands[st.id];
-    if (!h){ blocks.push(`<p class="note">${st.label} : non capturée.</p>`); continue; }
-    if (h.exception){ blocks.push(`<p class="note">${st.label} : exception déclarée — ${h.exception}.</p>`); continue; }
-    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi (${h.scale || 'estimée'}) · ${h.good}/4 exploitables${h.flags?.length ? ' · ' + h.flags.join(', ') : ''}</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, `${f.q.minuties} m.`, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
+    if (!h?.fingers?.length) continue;
+    html.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi (${h.scale || 'estimée'}) · ${h.good}/${h.fingers.length} exploitable(s)${h.flags?.length ? ' · ' + h.flags.join(', ') : ''}</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, `${f.q.minuties ?? '?'} m.`, f.q.exploitable?'ok':'ko')).join('')}</div><div id="ov-${st.id}"></div></div>`);
   }
-  const thumbs = STEPS.filter(s => s.kind === 'pouce');
-  blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">Pouces</span><div class="grid">${thumbs.map(st => { const h = S.hands[st.id]; const lab = st.side==='droite'?'droit':'gauche'; return h?.fingers?.[0] ? thumbHtml(`fp-${st.id}-0`, lab, `${h.fingers[0].q.minuties} m.`, h.fingers[0].q.exploitable?'ok':'ko') : `<div class="thumb ko"><div class="q"><span>${lab}</span><b>—</b></div>${h?.exception ? 'exception : ' + h.exception : 'non capturé'}</div>`; }).join('')}</div></div>`);
-  $('fingerThumbs').innerHTML = blocks.join('');
-  for (const st of STEPS) S.hands[st.id]?.fingers.forEach((f,i)=>{ const c = mount(`fp-${st.id}-${i}`, f.enhanced); if (f.ext) drawMinutiae(c, f.ext); });
+  $('fingerThumbs').innerHTML = html.join('');
+  for (const st of STEPS){
+    const h = S.hands[st.id]; if (!h?.fingers?.length) continue;
+    try {
+      h.fingers.forEach((f,i)=>{ const c = mount(`fp-${st.id}-${i}`, f.enhanced); if (f.ext) drawMinutiae(c, f.ext); });
+      // photo d'origine réduite, avec les cadres de découpe : permet de vérifier que les doigts ont bien été trouvés
+      if (h.overview){ const c = mount(`ov-${st.id}`, h.overview); c.className = 'overview'; const cap = document.createElement('div'); cap.className = 'hint'; cap.textContent = `Photo d'origine (${h.source}, ${h.frameSize.join('×')} px)`; $(`ov-${st.id}`).appendChild(cap); }
+    } catch(e){ log(`affichage ${st.label.toLowerCase()} impossible : ${e.message}`); $(`ov-${st.id}`).textContent = 'Affichage impossible : ' + e.message; }
+  }
+  $('journalRevue').textContent = journal.join('\n');
 }
 
 /* ---------------------------------------------------------------------
@@ -1243,8 +1274,7 @@ $('b-start').onclick = async () => {
 $('b-toFace').onclick = async () => {
   const ok = await runFace();
   if (!ok){ $('b-faceCancel').textContent = 'Terminer'; return; }
-  const okF = await runFingers();   // acquisition complète : visage + dix doigts, comme à l'enrôlement
-  if (!okF) return;
+  await runFingers();   // acquisition complète : visage + dix doigts, comme à l'enrôlement ; le récapitulatif dit ce qui manque
   renderReview();
 };
 $('b-faceCancel').onclick = () => { stopStreams(); log('capture du visage abandonnée'); location.reload(); };
@@ -1264,7 +1294,9 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, handAnalysis, detectSheet, openSession, cropFinger, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-log('prototype chargé');
+const VERSION = 'v6 · 1er octobre 2026';
+$('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
+log('prototype chargé — ' + VERSION);
 </script>
 </body>
 </html>
