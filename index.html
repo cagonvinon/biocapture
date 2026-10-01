@@ -134,9 +134,6 @@ details summary{cursor:pointer;font-weight:500}
     <div class="session" id="sessionInfo"></div>
   </div>
   <div class="checks" id="checks"></div>
-  <label class="row" style="align-items:center;gap:8px;font-size:13.5px" for="forceFinger" id="forceWrap" hidden>
-    <input type="checkbox" id="forceFinger"> Tenter quand même la capture d'empreintes (démonstration)
-  </label>
   <div class="spacer"></div>
   <button class="btn" id="b-toFace" disabled>Continuer vers la capture du visage</button>
 </main>
@@ -173,7 +170,7 @@ details summary{cursor:pointer;font-weight:500}
     <span class="spacer"></span>
     <button class="btn ghost small" id="b-wasm" hidden>Changer de moteur</button>
     <button class="btn small" id="b-handShot" hidden style="width:auto">Capturer</button>
-    <button class="btn ghost small" id="b-skipHand" hidden>Ignorer cette main</button>
+    <button class="btn ghost small" id="b-skipHand">Doigt absent ou blessé</button>
   </div>
 </section>
 
@@ -189,9 +186,9 @@ details summary{cursor:pointer;font-weight:500}
     <div class="facegrid" id="faceThumbs"></div>
   </section>
   <section class="block" id="fingerBlock">
-    <h3>Empreintes normalisées à 500 ppi</h3>
+    <h3>Empreintes à 500 ppi et minuties extraites</h3>
     <div id="fingerThumbs" style="display:grid;gap:10px"></div>
-    <p class="note">Échelle mesurée sur la largeur de la feuille A4 (210 mm) ; la longueur des phalanges sert de contrôle de cohérence.</p>
+    <p class="note">Échelle mesurée sur la largeur de la feuille A4 (210 mm). Cercles rouges : terminaisons ; cercles bleus : bifurcations ; « m. » : nombre de minuties. Le serveur refait sa propre extraction.</p>
   </section>
   <div class="spacer"></div>
   <div class="row"><button class="btn ghost" id="b-restart" style="flex:1">Recommencer</button><button class="btn" id="b-seal" style="flex:2">Chiffrer le paquet</button></div>
@@ -224,7 +221,7 @@ details summary{cursor:pointer;font-weight:500}
    Vote à distance des Béninois de l'étranger (note conceptuelle, § 4.2)
    Détection : @vladmandic/human 3.3.6 (TensorFlow.js, modèles MediaPipe)
    ===================================================================== */
-import Human from 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.esm.js';
+import Human, { match } from 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.esm.js';
 
 const CFG = {
   MODELS: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
@@ -245,6 +242,7 @@ const CFG = {
     WINDOW: 10,                // fenêtre glissante (images)
     AUTO_RATIO: 0.7,           // capture auto : critères tenus sur 70 % de la fenêtre
     MANUAL_AFTER_MS: 8000,     // bouton de capture manuelle après 8 s
+    CONTINUITY_MIN: 0.5,       // similarité minimale référence / images du défi (indicative)
     ACTION_TIMEOUT_MS: 12000,
   },
   HAND: {
@@ -254,6 +252,7 @@ const CFG = {
     FILL_MIN: 0.8,             // la feuille doit occuper 80 % du grand côté de l'écran
     MOVE_MAX: 0.015,           // déplacement max. des extrémités entre deux images (fraction de largeur)
     MIN_GOOD: { quatre: 2, pouce: 1 }, // doigts exploitables requis par prise
+    MIN_MINUTIAE: 12,          // minuties fiables requises pour qu'un doigt soit exploitable
   },
   // Feuille de référence posée sous la main. A4 : 210 mm entre les grands bords.
   // US Letter : 215.9 mm. A4 pliée en deux (A5) : 148.5 mm, résolution plus élevée.
@@ -300,7 +299,7 @@ const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
    --------------------------------------------------------------------- */
 const S = {
   session: null, server: null, device: null,
-  env: {}, fingerEnabled: false,
+  env: {},
   face: { attempts: 0, reference: null, challenge: [], pad: { real: [], live: [] } },
   hands: { droite: null, gauche: null, pouce_droite: null, pouce_gauche: null, attempts: { droite:0, gauche:0, pouce_droite:0, pouce_gauche:0 } },
   sealed: null,
@@ -361,26 +360,26 @@ async function checkTerminal(){
   try {
     rear = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{exact:'environment'}, width:{ideal:3840}, height:{ideal:2160} }, audio:false });
     const tr = rear.getVideoTracks()[0]; caps = tr.getCapabilities ? tr.getCapabilities() : {}; rs = tr.getSettings();
+    // la photo (ImageCapture) monte souvent bien plus haut que la vidéo
+    if (window.ImageCapture){ try { const pc = await new ImageCapture(tr).getPhotoCapabilities(); rs.photoMax = Math.max(pc.imageWidth?.max || 0, pc.imageHeight?.max || 0); } catch {} }
     rear.getTracks().forEach(t=>t.stop());
   } catch(e){ rear = null; }
   const maxW = Math.max(caps.width?.max || rs.width || 0, caps.height?.max || rs.height || 0);
   const torch = !!caps.torch; const af = Array.isArray(caps.focusMode) ? caps.focusMode.includes('continuous') : null;
-  S.env.rear = { present: !!rear, maxWidth: maxW, torch, continuousFocus: af };
+  S.env.rear = { present: !!rear, maxWidth: maxW, photoMax: rs.photoMax || null, torch, continuousFocus: af };
   if (!rear){
-    add('warn','Caméra arrière','Absente : la capture d\'empreintes n\'est pas possible sur ce terminal. Le visage seul sera transmis.','—');
-    S.fingerEnabled = false; $('forceWrap').hidden = false;
+    add('warn','Caméra arrière','Absente : en conditions réelles ce terminal serait refusé à l\'inscription. La démonstration utilisera la caméra frontale.','—');
   } else {
     const needPx = Math.ceil(CFG.HAND.PPI_MIN / 25.4 * CFG.SHEET.WIDTH_MM);
-    const okRes = maxW >= needPx;
-    add(okRes?'ok':'warn','Caméra arrière', okRes? `Résolution suffisante : la largeur de la feuille ${CFG.SHEET.LABEL} peut être lue à ${Math.round(maxW/CFG.SHEET.WIDTH_MM*25.4)} ppi au plus.` : `Moins de ${needPx} px sur le grand côté : empreintes inexploitables avec une feuille ${CFG.SHEET.LABEL}.`, `${maxW} px`);
+    const best = Math.max(maxW, S.env.rear.photoMax || 0);
+    const okRes = best >= needPx;
+    add(okRes?'ok':'warn','Caméra arrière', okRes? `Photo jusqu'à ${best} px : la feuille ${CFG.SHEET.LABEL} peut être lue à ${Math.round(best/CFG.SHEET.WIDTH_MM*25.4)} ppi au plus.` : `Moins de ${needPx} px annoncés : les empreintes seront capturées mais signalées comme de résolution insuffisante.`, `${best} px`);
     add(torch?'ok':'warn','Torche', torch? 'Pilotable : éclairage homogène des crêtes.' : 'Non pilotable depuis le navigateur. Prévoir une lumière forte.', torch?'oui':'non');
     add(af===false?'warn':'ok','Mise au point continue', af===null? 'Information non exposée par le navigateur.' : (af? 'Disponible.' : 'Absente : risque de flou à courte distance.'), af===null?'inconnu':(af?'oui':'non'));
-    S.fingerEnabled = okRes;
-    if (!okRes) $('forceWrap').hidden = false;
   }
   add('warn','Attestation d\'intégrité','Simulée. En natif : Play Integrity (Android) ou App Attest (iOS), vérifiée côté serveur.','simulée');
   S.env.ua = navigator.userAgent; S.env.webdriver = !!navigator.webdriver;
-  log(`terminal contrôlé — caméras ${devices.length}, arrière ${maxW}px, torche ${torch}, empreintes ${S.fingerEnabled?'oui':'non'}`);
+  log(`terminal contrôlé — caméras ${devices.length}, arrière vidéo ${maxW}px / photo ${S.env.rear.photoMax || '?'}px, torche ${torch}`);
   const blocking = items.some(c=>c.s==='ko');
   $('b-toFace').disabled = blocking;
   if (blocking) log('terminal refusé : contrôle bloquant en échec');
@@ -400,7 +399,7 @@ async function getHuman(){
     face: { enabled: true,
       detector: { rotation: true, maxDetected: 2, minConfidence: 0.5, skipFrames: 2, skipTime: 150 },
       mesh: { enabled: true }, iris: { enabled: true }, attention: { enabled: false },
-      emotion: { enabled: false }, description: { enabled: false },
+      emotion: { enabled: false }, description: { enabled: true },   // modèle chargé ; activé seulement pour l'extraction
       antispoof: { enabled: true, skipFrames: 10, skipTime: 500 },
       liveness: { enabled: true, skipFrames: 10, skipTime: 500 } },
     hand: { enabled: true, maxDetected: 2, minConfidence: 0.55, rotation: false, skipFrames: 1, skipTime: 80, landmarks: true },
@@ -609,7 +608,7 @@ async function runFace(){
       $('faceTimer').textContent = `session ${sessionLeft()} s`;
       if (sessionLeft() === 0) return resolve(fail('session expirée'));
       let res;
-      try { res = await H.detect(video, { face:{ enabled:true }, hand:{ enabled:false } }); }
+      try { res = await H.detect(video, { face:{ enabled:true, description:{ enabled:false } }, hand:{ enabled:false } }); }
       catch(e){ log('détection impossible : '+e.message); return resolve(fail('erreur du moteur de détection')); }
       const frame = frameOf(video);
       const M = faceMetrics(res, frame);
@@ -693,6 +692,15 @@ async function runFace(){
     S.face.reference = { token: tok, metrics: reference.M, mode: reference.mode };
     S.face.challenge = challengeFrames;
     S.face.padSummary = { real: mean(S.face.pad.real), live: mean(S.face.pad.live), frames: S.face.pad.real.length };
+    // Extraction des caractéristiques faciales : même personne du début à la fin du défi ?
+    adv.force('Extraction des caractéristiques…', 'Contrôle de la continuité du visage.', 'good');
+    try {
+      const ref = await faceEmbedding(reference.frame);
+      const sims = [];
+      for (const c of challengeFrames){ const e = await faceEmbedding(c.frame); sims.push(ref && e ? +match.similarity(ref, e).toFixed(3) : null); }
+      S.face.features = { longueur_gabarit: ref?.length || 0, similarite_defi: sims, continuite: sims.every(v => v !== null && v >= CFG.FACE.CONTINUITY_MIN) };
+      log(`caractéristiques faciales : gabarit ${ref?.length || 0} valeurs, similarité référence/défi ${sims.join(' / ')}`);
+    } catch(e){ S.face.features = { erreur: e.message }; log('extraction faciale impossible : ' + e.message); }
     log(`visage terminé — PAD passif indicatif real=${S.face.padSummary.real?.toFixed(2)} live=${S.face.padSummary.live?.toFixed(2)}`);
     return true;
   }
@@ -908,7 +916,9 @@ async function captureStill(video, step, preview){
   const ppi = an.ppiSheet || an.A.ppi;
   const fingers = step.fingers.map(f => {
     const crop = cropFinger(img, an.kp, f, an.A.width, ppi);
-    return { finger: f, code: f.code[step.side], crop: toGray(crop), enhanced: ridgeEnhance(crop), q: fingerQuality(crop) };
+    const gray = toGray(crop), q = fingerQuality(crop), ext = extractMinutiae(gray);
+    q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.exploitable = q.exploitable && ext.count >= CFG.HAND.MIN_MINUTIAE;
+    return { finger: f, code: f.code[step.side], crop: gray, enhanced: ridgeEnhance(crop), q, ext };
   });
   const good = fingers.filter(x=>x.q.exploitable).length;
   const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push('résolution insuffisante'); if (scale === 'phalange') flags.push('échelle estimée');
@@ -929,11 +939,19 @@ async function captureHand(step){
   let prevTips = null, nanFrames = 0, manual = false, last = null;
   const tStart = performance.now();
   return new Promise((resolve) => {
-    let skip = false; $('b-skipHand').onclick = () => { skip = true; };
+    let skip = null;
+    $('b-skipHand').onclick = () => {
+      const el = $('handInstr'); el.className = 'instr alert';
+      el.innerHTML = `<h2>Déclarer une exception · ${step.label}</h2><p>Comme à l'enrôlement, l'absence d'une empreinte est consignée avec son motif.</p><div class="row" style="margin-top:8px"><button class="btn small" id="x-amp" style="width:auto">Amputation</button><button class="btn small" id="x-bles" style="width:auto">Blessure ou pansement</button><button class="btn ghost small" id="x-ann" style="width:auto;color:#fff;border-color:#fff">Annuler</button></div>`;
+      $('x-amp').onclick = () => { skip = 'amputation'; }; $('x-bles').onclick = () => { skip = 'blessure ou pansement'; }; $('x-ann').onclick = () => { adv.force(...stepIntro(step)); };
+      paused = true; $('x-ann').addEventListener('click', () => { paused = false; });
+    };
+    let paused = false;
     $('b-handShot').onclick = () => { manual = true; };
     const loop = async () => {
       if (!S.streams.length) return resolve(null);
-      if (skip) return resolve({ skipped:true });
+      if (skip) return resolve({ exception: skip });
+      if (paused){ requestAnimationFrame(loop); return; }
       if (sessionLeft() === 0) return resolve({ error:'session expirée' });
       const vw = video.videoWidth, vh = video.videoHeight; const k = Math.min(1, HC.DETECT_W / Math.min(vw, vh));
       det.width = Math.round(vw*k); det.height = Math.round(vh*k); det.getContext('2d').drawImage(video,0,0,det.width,det.height);
@@ -1011,11 +1029,10 @@ async function runFingers(){
   for (const step of STEPS){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
-      $('b-skipHand').hidden = S.hands.attempts[step.id] < 1;
       const r = await captureHand(step);
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); stopStreams(); return false; }
-      if (r.skipped){ log(`${step.label.toLowerCase()} : prise ignorée par l'électeur`); break; }
+      if (r.exception){ S.hands[step.id] = { exception: r.exception, fingers: [], good: 0, ppi: 0 }; log(`${step.label.toLowerCase()} : exception déclarée — ${r.exception}`); break; }
       if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} : prise enregistrée`, (n > 1 ? `${r.good} doigts exploitables sur ${n}` : 'Empreinte exploitable') + ` · ${Math.round(r.ppi)} ppi.`, 'good'); await new Promise(x=>setTimeout(x,1500)); break; }
       S.hands.attempts[step.id]++;
       if (S.hands.attempts[step.id] >= CFG.MAX_ATTEMPTS){ S.hands[step.id] = r; log(`${step.label.toLowerCase()} : tentatives épuisées, dernière prise conservée pour examen`); break; }
@@ -1028,10 +1045,74 @@ async function runFingers(){
 }
 
 /* ---------------------------------------------------------------------
+   Extraction des caractéristiques sur le terminal (contrôle de qualité)
+   Minuties : normalisation locale → binarisation → squelette (Zhang-Suen)
+   → nombre de croisements (1 = terminaison, 3 = bifurcation) → orientation
+   par tenseur de structure. Format proche de l'ISO/IEC 19794-2 :
+   x, y en pixels à 500 ppi, angle en degrés, type T (terminaison) ou B (bifurcation).
+   Le serveur refait sa propre extraction : celle-ci sert à juger la qualité.
+   --------------------------------------------------------------------- */
+function extractMinutiae(gray){
+  const W = gray.width, H = gray.height;
+  const d = gray.getContext('2d', { willReadFrequently:true }).getImageData(0,0,W,H).data;
+  const g = new Float32Array(W*H); for (let i=0,j=0;i<g.length;i++,j+=4) g[i] = d[j];
+  const integ = (src) => { const I = new Float64Array((W+1)*(H+1)); for (let y=0;y<H;y++){ let rs=0; for (let x=0;x<W;x++){ rs += src[y*W+x]; I[(y+1)*(W+1)+x+1] = I[y*(W+1)+x+1] + rs; } } return I; };
+  const box = (I, x, y, r) => { const x0=Math.max(0,x-r), x1=Math.min(W,x+r+1), y0=Math.max(0,y-r), y1=Math.min(H,y+r+1); return [I[y1*(W+1)+x1]-I[y0*(W+1)+x1]-I[y1*(W+1)+x0]+I[y0*(W+1)+x0], (x1-x0)*(y1-y0)]; };
+  const g2 = g.map(v=>v*v); const I1 = integ(g), I2 = integ(g2);
+  const norm = new Float32Array(W*H), fg = new Uint8Array(W*H);
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const [s,n] = box(I1,x,y,8), [s2] = box(I2,x,y,8); const m = s/n, sd = Math.sqrt(Math.max(0, s2/n - m*m)); const i = y*W+x; norm[i] = (g[i]-m)/(sd+1); fg[i] = sd > 6 ? 1 : 0; }
+  // zone utile : avant-plan contrasté, rognée de 12 px pour écarter les bords
+  const IF = integ(fg); const margin = 16; const core = new Uint8Array(W*H);
+  for (let y=margin;y<H-margin;y++) for (let x=margin;x<W-margin;x++){ const [s,n] = box(IF,x,y,margin); core[y*W+x] = s === n ? 1 : 0; }
+  // lissage 3×3 puis binarisation (sans contact : crêtes plus claires que les vallées)
+  const bin = new Uint8Array(W*H);
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ let s=0; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) s += norm[(y+dy)*W+x+dx]; bin[y*W+x] = fg[y*W+x] && s > 0 ? 1 : 0; }
+  // squelettisation de Zhang-Suen
+  const P = (i) => [bin[i-W], bin[i-W+1], bin[i+1], bin[i+W+1], bin[i+W], bin[i+W-1], bin[i-1], bin[i-W-1]];
+  let changed = true, guard = 0;
+  while (changed && guard++ < 40){
+    changed = false;
+    for (const pass of [0,1]){
+      const del = [];
+      for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; if (!bin[i]) continue; const p = P(i); const B = p.reduce((a,b)=>a+b,0); if (B<2 || B>6) continue;
+        let A = 0; for (let k=0;k<8;k++) if (!p[k] && p[(k+1)%8]) A++; if (A !== 1) continue;
+        if (pass === 0 ? (p[0]*p[2]*p[4] === 0 && p[2]*p[4]*p[6] === 0) : (p[0]*p[2]*p[6] === 0 && p[0]*p[4]*p[6] === 0)) del.push(i); }
+      if (del.length){ changed = true; for (const i of del) bin[i] = 0; }
+    }
+  }
+  // gradients pour l'orientation locale
+  const gx = new Float32Array(W*H), gy = new Float32Array(W*H);
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; gx[i] = (g[i-W+1]+2*g[i+1]+g[i+W+1]) - (g[i-W-1]+2*g[i-1]+g[i+W-1]); gy[i] = (g[i+W-1]+2*g[i+W]+g[i+W+1]) - (g[i-W-1]+2*g[i-W]+g[i-W+1]); }
+  const orient = (x,y) => { let xx=0, yy=0, xy=0; for (let dy=-6;dy<=6;dy++) for (let dx=-6;dx<=6;dx++){ const xi=x+dx, yi=y+dy; if (xi<1||yi<1||xi>=W-1||yi>=H-1) continue; const i=yi*W+xi; xx+=gx[i]*gx[i]; yy+=gy[i]*gy[i]; xy+=gx[i]*gy[i]; } return 0.5*Math.atan2(2*xy, xx-yy) + Math.PI/2; };
+  // nombre de croisements
+  let list = [];
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; if (!bin[i] || !core[i]) continue; const p = P(i);
+    let cn = 0; for (let k=0;k<8;k++) cn += Math.abs(p[k] - p[(k+1)%8]); cn /= 2;
+    if (cn === 1 || cn === 3) list.push({ x, y, t: cn === 1 ? 'T' : 'B' }); }
+  // élimination des fausses minuties : paires trop proches (épines, ponts, coupures)
+  const drop = new Set();
+  for (let a=0;a<list.length;a++) for (let b=a+1;b<list.length;b++){ if (Math.hypot(list[a].x-list[b].x, list[a].y-list[b].y) < 8){ drop.add(a); drop.add(b); } }
+  list = list.filter((_,i)=>!drop.has(i)).map(m => ({ ...m, a: Math.round(orient(m.x,m.y)*180/Math.PI + 360) % 360 }));
+  const area = core.reduce((s,v)=>s+v,0) / (500/25.4)**2;   // surface utile en mm²
+  return { minutiae: list, count: list.length, area_mm2: +area.toFixed(1) };
+}
+function drawMinutiae(canvas, ext){
+  const ctx = canvas.getContext('2d'); ctx.lineWidth = 2;
+  for (const m of ext.minutiae){ ctx.strokeStyle = m.t === 'T' ? '#e5484d' : '#2f7fe0'; ctx.beginPath(); ctx.arc(m.x, m.y, 5, 0, Math.PI*2); ctx.stroke();
+    const r = m.a*Math.PI/180; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(m.x + 10*Math.cos(r), m.y + 10*Math.sin(r)); ctx.stroke(); }
+}
+async function faceEmbedding(img){
+  const H = await getHuman();
+  const r = await H.detect(img, { face:{ enabled:true, description:{ enabled:true } }, hand:{ enabled:false } });
+  const f = (r.face || [])[0];
+  return f?.embedding?.length ? f.embedding : null;
+}
+
+/* ---------------------------------------------------------------------
    Étape 4 — revue
    --------------------------------------------------------------------- */
 function thumbHtml(id, label, q, cls){ return `<div class="thumb ${cls}"><div id="${id}"></div><div class="q"><span>${label}</span><b>${q}</b></div></div>`; }
-function mount(id, canvas){ const el = $(id); const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; c.getContext('2d').drawImage(canvas,0,0); S.canvases.push(c); el.appendChild(c); }
+function mount(id, canvas){ const el = $(id); const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; c.getContext('2d').drawImage(canvas,0,0); S.canvases.push(c); el.appendChild(c); return c; }
 function renderReview(){
   show('s-revue');
   const fr = S.face.reference;
@@ -1041,13 +1122,13 @@ function renderReview(){
   for (const st of STEPS.filter(s => s.kind === 'quatre')){
     const h = S.hands[st.id];
     if (!h){ blocks.push(`<p class="note">${st.label} : non capturée.</p>`); continue; }
-    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi (${h.scale || 'estimée'}) · ${h.good}/4 exploitables${h.flags?.length ? ' · ' + h.flags.join(', ') : ''}</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, f.q.score, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
+    if (h.exception){ blocks.push(`<p class="note">${st.label} : exception déclarée — ${h.exception}.</p>`); continue; }
+    blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">${st.label} · ${Math.round(h.ppi)} ppi (${h.scale || 'estimée'}) · ${h.good}/4 exploitables${h.flags?.length ? ' · ' + h.flags.join(', ') : ''}</span><div class="grid">${h.fingers.map((f,i)=>thumbHtml(`fp-${st.id}-${i}`, f.finger.fr, `${f.q.minuties} m.`, f.q.exploitable?'ok':'ko')).join('')}</div></div>`);
   }
   const thumbs = STEPS.filter(s => s.kind === 'pouce');
-  blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">Pouces</span><div class="grid">${thumbs.map(st => { const h = S.hands[st.id]; return h ? thumbHtml(`fp-${st.id}-0`, st.side==='droite'?'droit':'gauche', h.fingers[0].q.score, h.fingers[0].q.exploitable?'ok':'ko') : `<div class="thumb ko"><div class="q"><span>${st.side==='droite'?'droit':'gauche'}</span><b>—</b></div>non capturé</div>`; }).join('')}</div></div>`);
+  blocks.push(`<div style="display:grid;gap:6px"><span class="eyebrow">Pouces</span><div class="grid">${thumbs.map(st => { const h = S.hands[st.id]; const lab = st.side==='droite'?'droit':'gauche'; return h?.fingers?.[0] ? thumbHtml(`fp-${st.id}-0`, lab, `${h.fingers[0].q.minuties} m.`, h.fingers[0].q.exploitable?'ok':'ko') : `<div class="thumb ko"><div class="q"><span>${lab}</span><b>—</b></div>${h?.exception ? 'exception : ' + h.exception : 'non capturé'}</div>`; }).join('')}</div></div>`);
   $('fingerThumbs').innerHTML = blocks.join('');
-  $('fingerBlock').hidden = !S.fingerEnabled;
-  for (const st of STEPS) S.hands[st.id]?.fingers.forEach((f,i)=>mount(`fp-${st.id}-${i}`, f.enhanced));
+  for (const st of STEPS) S.hands[st.id]?.fingers.forEach((f,i)=>{ const c = mount(`fp-${st.id}-${i}`, f.enhanced); if (f.ext) drawMinutiae(c, f.ext); });
 }
 
 /* ---------------------------------------------------------------------
@@ -1063,7 +1144,7 @@ async function seal(){
   await addImg('visage.reference', S.face.reference.token, 'image/jpeg', 0.92, { format:'ISO/IEC 39794-5 token frontal' });
   for (const c of S.face.challenge) await addImg('visage.defi.'+c.action, c.frame, 'image/jpeg', 0.85, { t_ms:c.t_ms });
   for (const st of STEPS) for (const f of (S.hands[st.id]?.fingers || []))
-    await addImg('empreinte.'+f.code, f.crop, 'image/png', undefined, { position_iso: f.code, doigt: `${f.finger.fr} ${st.side==='droite'?'droit':'gauche'}`, ppi: 500, qualite: f.q });
+    await addImg('empreinte.'+f.code, f.crop, 'image/png', undefined, { position_iso: f.code, doigt: `${f.finger.fr} ${st.side==='droite'?'droit':'gauche'}`, ppi: 500, qualite: f.q, minuties_terminal: f.ext ? f.ext.minutiae.map(m => [m.x, m.y, m.a, m.t]) : [] });
   const m = S.face.reference.metrics;
   const manifest = {
     version: 'capture/1.0',
@@ -1075,8 +1156,10 @@ async function seal(){
       defi: { demande: sess.challenge, realise: S.face.challenge.map(c=>({ action:c.action, t_ms:c.t_ms })) },
       pad_passif_indicatif: S.face.padSummary,
       tentatives: S.face.attempts + 1,
+      caracteristiques_terminal: S.face.features || null,
     },
-    empreintes: STEPS.map(st => S.hands[st.id] ? { prise: st.label, ppi: Math.round(S.hands[st.id].ppi), echelle: S.hands[st.id].scale, source: S.hands[st.id].source, mode: S.hands[st.id].mode, alertes: S.hands[st.id].flags, ppi_phalange: Math.round(S.hands[st.id].ppiPhalange||0), feuille: S.hands[st.id].sheet, exploitables: S.hands[st.id].good, sur: st.fingers.length, tentatives: S.hands.attempts[st.id]+1 } : { prise: st.label, capturee: false }),
+    caracteristiques: 'extraites sur le terminal pour le contrôle de qualité ; le service d\'authentification refait sa propre extraction sur les images',
+    empreintes: STEPS.map(st => S.hands[st.id]?.exception ? { prise: st.label, exception: S.hands[st.id].exception } : S.hands[st.id] ? { prise: st.label, ppi: Math.round(S.hands[st.id].ppi), echelle: S.hands[st.id].scale, source: S.hands[st.id].source, mode: S.hands[st.id].mode, alertes: S.hands[st.id].flags, ppi_phalange: Math.round(S.hands[st.id].ppiPhalange||0), feuille: S.hands[st.id].sheet, exploitables: S.hands[st.id].good, sur: st.fingers.length, tentatives: S.hands.attempts[st.id]+1 } : { prise: st.label, capturee: false }),
     images: images.map(({_bytes, ...rest}) => rest),
   };
   // Charge utile : manifeste + images (base64 ici ; CBOR binaire en natif)
@@ -1157,11 +1240,11 @@ $('b-start').onclick = async () => {
   getHuman().catch(e => log('chargement des modèles impossible : '+e.message));
   await checkTerminal();
 };
-$('forceFinger').onchange = (e) => { S.fingerEnabled = e.target.checked; };
 $('b-toFace').onclick = async () => {
   const ok = await runFace();
   if (!ok){ $('b-faceCancel').textContent = 'Terminer'; return; }
-  if (S.fingerEnabled){ await runFingers(); }
+  const okF = await runFingers();   // acquisition complète : visage + dix doigts, comme à l'enrôlement
+  if (!okF) return;
   renderReview();
 };
 $('b-faceCancel').onclick = () => { stopStreams(); log('capture du visage abandonnée'); location.reload(); };
@@ -1180,7 +1263,7 @@ $('b-send').onclick = async () => {
 $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
-if (location.hash === '#debug') window.__proto = { S, CFG, FINGERS, THUMB, STEPS, handAnalysis, detectSheet, openSession, cropFinger, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, handAnalysis, detectSheet, openSession, cropFinger, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
 log('prototype chargé');
 </script>
 </body>
