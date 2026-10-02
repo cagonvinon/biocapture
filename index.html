@@ -265,6 +265,7 @@ const CFG = {
     WINDOW: 8, AUTO_RATIO: 0.7, MANUAL_AFTER_MS: 6000,
     MOVE_MAX: 0.015,           // déplacement max. des extrémités entre deux images (fraction de largeur)
     MIN_GOOD: { quatre: 2, pouce: 1 }, // doigts exploitables requis par prise
+    MIN_DETECTED: 3,           // la prise des quatre doigts se déclenche dès 3 doigts repérés ; le doigt manquant est consigné
     MIN_MINUTIAE: 12,          // minuties fiables requises pour qu'un doigt soit exploitable
   },
   // longueur approximative articulation distale → extrémité (mm), adulte
@@ -493,14 +494,18 @@ async function openFingerCamera(video, facing){
     if (pick) deviceId = pick.deviceId;
     log(`objectifs arrière : ${back.map(d=>d.label).join(' · ') || 'non nommés'} — choisi : ${pick?.label || 'par défaut'}`);
   }
-  const video_ = deviceId ? { deviceId:{ exact: deviceId }, width:{ ideal:4032 }, height:{ ideal:3024 } } : { facingMode: facing, width:{ ideal:4032 }, height:{ ideal:3024 } };
+  // 3840 × 2160 d'abord : c'est la demande que Safari et Chrome sur iPhone honorent (2160 × 3840 obtenu à l'essai)
+  const video_ = deviceId ? { deviceId:{ exact: deviceId }, width:{ ideal:3840 }, height:{ ideal:2160 } } : { facingMode: facing, width:{ ideal:3840 }, height:{ ideal:2160 } };
   const stream = await navigator.mediaDevices.getUserMedia({ video: video_, audio:false });
   S.streams.push(stream); video.srcObject = stream; await video.play();
   await new Promise(r => video.readyState >= 2 ? r() : video.onloadeddata = r);
   const tr = stream.getVideoTracks()[0], caps = tr.getCapabilities?.() || {};
   const mw = caps.width?.max, mh = caps.height?.max;
+  // montée en résolution seulement si elle n'aboutit pas à une image plus petite (l'essai du 2 octobre a montré un recul en 1080p)
+  const before = Math.min(video.videoWidth, video.videoHeight);
   if (mw && mh && Math.max(video.videoWidth, video.videoHeight) < Math.max(mw, mh)){
-    try { await tr.applyConstraints({ width:{ ideal: Math.max(mw,mh) }, height:{ ideal: Math.min(mw,mh) } }); await new Promise(r => setTimeout(r, 400)); } catch(e){ log('résolution maximale refusée : ' + e.name); }
+    try { await tr.applyConstraints({ width:{ ideal: Math.max(mw,mh) }, height:{ ideal: Math.min(mw,mh) } }); await new Promise(r => setTimeout(r, 500)); } catch(e){ log('résolution maximale refusée : ' + e.name); }
+    if (Math.min(video.videoWidth, video.videoHeight) < before){ try { await tr.applyConstraints({ width:{ ideal:3840 }, height:{ ideal:2160 } }); await new Promise(r => setTimeout(r, 500)); } catch {} log('résolution maximale moins bonne : retour au 4K'); }
   }
   log(`caméra des doigts : ${video.videoWidth}×${video.videoHeight} (maximum annoncé ${mw || '?'}×${mh || '?'}) — ${tr.label}`);
   return stream;
@@ -844,16 +849,33 @@ function segmentFingers(src, sw, sh, expected){
     let sy=0,sx=0,syy=0,sxy=0; for (const [yy,x0,x1] of mid){ const cx=(x0+x1)/2; sy+=yy; sx+=cx; syy+=yy*yy; sxy+=cx*yy; }
     const m = mid.length, b = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a = (sx-b*sy)/m;
     const y0 = t.rows[0][0];
+    // le bout d'un doigt est précédé de papier : une bande qui naît dans une zone sombre (table, objet) est écartée
+    const xc = Math.round(a + b*y0); let paperAbove = y0 <= 3;
+    if (!paperAbove && xc > 0 && xc < W){ let bg = 0; for (let dy=2; dy<=6; dy++){ const yy = y0-dy; if (yy >= 0 && !mask[yy*W+xc] && lum[yy*W+xc] > tL) bg++; } paperAbove = bg >= 3; }
+    if (!paperAbove) continue;
     tracks.push({ tip:[(a+b*y0)/k, y0/k], b, w: w/k, len: n/k, area: n*w, cutTop: y0 <= 2 });
   }
   tracks.sort((p,q) => q.area - p.area);
-  const fingers = tracks.slice(0, expected).sort((p,q) => p.tip[0] - q.tip[0]);
+  // largeurs cohérentes entre doigts : on écarte ce qui est deux fois plus large ou plus étroit que la médiane
+  const wRef = median(tracks.slice(0, expected).map(t => t.w));
+  const coherent = tracks.filter(t => t.w > wRef*0.55 && t.w < wRef*1.8);
+  const fingers = coherent.slice(0, expected).sort((p,q) => p.tip[0] - q.tip[0]);
   return { fingers, found: tracks.length, paper, thr: Math.round(tL), topCut, sideCut: sideRows > H*0.6*0.25, skinShare: mask.reduce((s,v)=>s+v,0)/(W*H), mask, W, H };
 }
 function median(a){ if (!a.length) return 0; const s = [...a].sort((x,y)=>x-y); return s[s.length>>1]; }
 // clés des doigts de gauche à droite à l'écran (main posée paume vers l'objectif, doigts vers le haut)
-function fingerKeys(step){ if (step.kind === 'pouce') return [THUMB]; return step.side === 'droite' ? [FINGERS[3], FINGERS[2], FINGERS[1], FINGERS[0]] : [FINGERS[0], FINGERS[1], FINGERS[2], FINGERS[3]]; }
-function segPpi(seg, step){ const keys = fingerKeys(step); return median(seg.fingers.map((f,i) => f.w / (FINGER_WIDTH_MM[keys[i].key]/25.4))); }
+function fingerKeys_(step){ if (step.kind === 'pouce') return [THUMB]; return step.side === 'droite' ? [FINGERS[3], FINGERS[2], FINGERS[1], FINGERS[0]] : [FINGERS[0], FINGERS[1], FINGERS[2], FINGERS[3]]; }
+// Attribution des doigts de gauche à droite. Avec 3 doigts sur 4, le majeur est le bout le plus haut :
+// on cale la fenêtre sur lui ; à défaut, on suppose que l'auriculaire manque (le plus souvent noyé dans la paume).
+function fingerKeys(step, fingers){
+  const order = fingerKeys_(step); const n = fingers?.length ?? order.length;
+  if (step.kind === 'pouce' || n >= order.length) return order;
+  const hi = fingers.reduce((m,f,i,a) => f.tip[1] < a[m].tip[1] ? i : m, 0), mid = order.indexOf(FINGERS[1]);
+  let s = mid - hi; if (s < 0 || s > order.length - n) s = step.side === 'droite' ? order.length - n : 0;
+  return order.slice(s, s + n);
+}
+function segPpi(seg, step){ const keys = fingerKeys(step, seg.fingers); return median(seg.fingers.map((f,i) => f.w / (FINGER_WIDTH_MM[keys[i].key]/25.4))); }
+function minFingers(step){ return step.kind === 'pouce' ? 1 : CFG.HAND.MIN_DETECTED; }
 // rectangle de la phalange distale : du bout du doigt vers la base, 1,5 largeur de long
 function phalanxBox(f){
   const n = Math.hypot(f.b, 1), ux = f.b/n, uy = 1/n;            // vers la base du doigt
@@ -887,20 +909,23 @@ function makeDiag(img, seg){
   return c;
 }
 // Traitement d'une image fixe, quelle que soit sa provenance (photo du navigateur, appareil photo du téléphone, vidéo)
-async function processImage(img, step, source){
-  const expected = step.fingers.length;
+async function processImage(img, step, source, mapped){
+  const expected = step.fingers.length, need = minFingers(step);
   let seg = segmentFingers(img, img.width, img.height, expected);
-  if (seg.fingers.length < expected){
+  // repérage refait sur l'image ; s'il trouve moins que l'aperçu, on reprend les doigts repérés dans l'aperçu
+  if (mapped?.length >= need && seg.fingers.length < mapped.length){ log(`${source} : repérage repris de l'aperçu (${mapped.length} doigts au lieu de ${seg.fingers.length})`); seg = { ...seg, fingers: mapped }; }
+  if (seg.fingers.length < need && !mapped){
     // image couchée : on essaie les deux quarts de tour et on garde le sens où l'on trouve le plus de doigts
     for (const dir of [1, -1]){ const r = rotate90(img, dir); const s2 = segmentFingers(r, r.width, r.height, expected);
       if (s2.fingers.length > seg.fingers.length){ img = r; seg = s2; } }
   }
-  if (seg.fingers.length < expected){
+  if (seg.fingers.length < need){
     const e = new Error(`${seg.fingers.length} doigt(s) repéré(s) sur ${expected} (${source}, ${img.width}×${img.height} px, papier ${seg.paper}, seuil ${seg.thr}, peau ${Math.round(seg.skinShare*100)} %)`);
     e.diag = makeDiag(img, seg); throw e;
   }
-  const keys = fingerKeys(step);
+  const keys = fingerKeys(step, seg.fingers);
   const ppi = segPpi(seg, step);
+  const missing = step.fingers.filter(f => !keys.includes(f)).map(f => f.fr);
   const fingers = seg.fingers.map((sf, i) => {
     const f = keys[i]; const crop = cropSeg(img, sf, ppi);
     const gray = toGray(crop), q = fingerQuality(crop), ext = extractMinutiae(gray);
@@ -909,7 +934,7 @@ async function processImage(img, step, source){
   }).sort((p,q) => step.fingers.indexOf(p.finger) - step.fingers.indexOf(q.finger));
   const overview = makeDiag(img, { fingers: seg.fingers });
   const good = fingers.filter(x=>x.q.exploitable).length;
-  const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push(`sous la norme (${Math.round(ppi)} ppi < ${CFG.HAND.PPI_MIN})`);
+  const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push(`sous la norme (${Math.round(ppi)} ppi < ${CFG.HAND.PPI_MIN})`); if (missing.length) flags.push(`non repéré : ${missing.join(', ')}`);
   log(`${step.label.toLowerCase()} : ${source} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (largeur des doigts), ${good}/${fingers.length} exploitable(s), minuties ${fingers.map(x=>x.q.minuties).join('/')}${flags.length ? ' — ' + flags.join(', ') : ''}`);
   return { fingers, overview, ppi, scale: 'largeur des doigts', source, flags, good, frameSize:[img.width, img.height] };
 }
@@ -928,11 +953,18 @@ async function captureStill(video, step, preview, fallback){
         const cx = tips.reduce((a,f)=>a+f.tip[0],0)/tips.length/vw, cy = Math.min(0.95, tips.reduce((a,f)=>a+f.tip[1]+f.w,0)/tips.length/vh);
         try { await track.applyConstraints({ advanced:[{ pointsOfInterest:[{ x:cx, y:cy }] }] }); await new Promise(r=>setTimeout(r,500)); } catch {}
       }
-      const img = await loadImage(await new ImageCapture(track).takePhoto());
-      return await processImage(img, step, 'photo du navigateur');
+      let img = await loadImage(await new ImageCapture(track).takePhoto());
+      if ((img.width > img.height) !== (vw > vh)) img = rotate90(img, 1);
+      // la vidéo est un recadrage du capteur : on ramène la photo au même champ que l'aperçu
+      const av = vw/vh, ap = img.width/img.height; let cw = img.width, ch = img.height;
+      if (ap > av) cw = Math.round(ch*av); else ch = Math.round(cw/av);
+      const crop = newCanvas(cw, ch); crop.getContext('2d').drawImage(img, (img.width-cw)/2, (img.height-ch)/2, cw, ch, 0, 0, cw, ch);
+      const kk = cw / vw;
+      const mapped = tips.length ? tips.map(f => ({ ...f, tip:[f.tip[0]*kk, f.tip[1]*kk], w: f.w*kk, len: f.len*kk })) : null;
+      return await processImage(crop, step, 'photo du navigateur', mapped);
     } catch(e){ firstErr = e; log('photo du navigateur : ' + (e.message || e.name)); }
   }
-  try { return await processImage(fallback || frameOf(video, true), step, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo'); }
+  try { return await processImage(fallback || frameOf(video, true), step, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', preview?.fingers || null); }
   catch(e){ throw firstErr?.diag ? firstErr : e; }
 }
 
@@ -977,7 +1009,7 @@ async function captureHand(step){
       const vLong = Math.max(vw, vh), photoFactor = !window.ImageCapture ? 1 : S.env.rear?.photoMax ? Math.max(1, S.env.rear.photoMax / vLong) : HC.PHOTO_FACTOR_DEFAULT;
       const ppiPhoto = ppiNow ? ppiNow * photoFactor : null;
       const tips = seg.fingers.map(f => f.tip);
-      let moved = 1; if (n === expected && prevTips?.length === n) moved = Math.max(...tips.map((p,i)=>dist(p,prevTips[i])))/vw;
+      let moved = 1; if (n >= minFingers(step) && prevTips?.length === n) moved = Math.max(...tips.map((p,i)=>dist(p,prevTips[i])))/vw;
       prevTips = tips;
       // vidéo limitée à 1080p (cas de Safari sur iPhone) : seuil de démonstration abaissé, prise marquée « sous la norme »
       const ppiAuto = Math.min(vw, vh) >= 2000 || window.ImageCapture ? HC.PPI_AUTO : HC.PPI_AUTO_1080;
@@ -986,11 +1018,11 @@ async function captureHand(step){
       // doigts entiers : chaque cadre de phalange tient dans l'image (la paume, le pouce ou la table au bord n'y changent rien)
       const inside = (f) => { if (f.cutTop) return false; const bx = phalanxBox(f), m = 0.01*Math.min(vw,vh), r = Math.hypot(bx.W, bx.L)/2;
         return bx.cx - r > -m*0 + m && bx.cx + r < vw - m && bx.cy - r > m && bx.cy + r < vh - m; };
-      const c = { nombre: n === expected, resolution: !!ppiPhoto && ppiPhoto >= ppiAuto && ppiPhoto <= HC.PPI_MAX, entiers: n > 0 && seg.fingers.every(inside), stable: moved < HC.MOVE_MAX, net: n > 0 && sharp >= bestSharp*HC.SHARP_REL };
+      const c = { nombre: n >= minFingers(step), resolution: !!ppiPhoto && ppiPhoto >= ppiAuto && ppiPhoto <= HC.PPI_MAX, entiers: n > 0 && seg.fingers.every(inside), stable: moved < HC.MOVE_MAX, net: n > 0 && sharp >= bestSharp*HC.SHARP_REL };
       // la netteté est indicative : à la capture, on retient l'image la plus nette d'une courte rafale
       c.all = c.nombre && c.resolution && c.entiers && c.stable;
       for (const key of Object.keys(W)) W[key].push(c[key]);
-      if (n === expected) last = { fingers: seg.fingers };
+      if (n >= minFingers(step)) last = { fingers: seg.fingers };
       const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
       chips($('handChips'), [[`${n}/${expected} doigt${expected>1?'s':''}`, ck('nombre','ko')], [`≈ ${ppiPhoto ? Math.round(ppiPhoto) : '—'} ppi`, ck('resolution')], ['doigts entiers', ck('entiers')], ['net', ck('net')], ['stable', ck('stable')]]);
       const now = performance.now(); fps = fps ? fps*0.8 + 0.2*(1000/Math.max(1, now - lastT)) : 0; lastT = now;
@@ -1000,7 +1032,7 @@ async function captureHand(step){
       if (!W.nombre.ok(0.5)){
         if (n === 0 && seg.skinShare > 0.12) adv.set('Écartez légèrement les doigts', 'Les doigts collés forment une seule masse : un petit espace entre chaque doigt suffit.');
         else if (n === 0) adv.set(...stepIntro(step));
-        else if (n < expected) adv.set('Écartez légèrement les doigts', `${n} doigt(s) repéré(s) sur ${expected}. Les doigts doivent être entièrement sur la feuille blanche.`);
+        else if (n < minFingers(step)) adv.set('Doigts sur la feuille blanche', `${n} doigt(s) repéré(s). Les bouts des doigts doivent reposer sur le papier, légèrement séparés.`);
         else adv.set(step.kind === 'pouce' ? 'Repliez les autres doigts' : 'Seulement quatre doigts', 'Gardez dans le cadre uniquement les doigts demandés.');
       }
       else if (!W.entiers.ok(0.5)) adv.set('Reculez un peu', 'Le bout d\'un doigt sort de l\'écran.');
@@ -1010,14 +1042,14 @@ async function captureHand(step){
       drawSegOverlay(ov, video, seg, W.all.ok(HC.AUTO_RATIO));
 
       if (burst){
-        if (n === expected && sharp > burst.sharp){ burst.sharp = sharp; burst.seg = seg; if (!burst.canvas) burst.canvas = newCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); }
+        if (n >= minFingers(step) && sharp > burst.sharp){ burst.sharp = sharp; burst.seg = seg; if (!burst.canvas) burst.canvas = newCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); }
         if (++burst.count >= HC.BURST_FRAMES){
           const b = burst; burst = null;
           log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté retenue ${b.sharp.toFixed(0)}`);
           try { const r = await captureStill(video, step, b.seg || last, b.canvas); r.mode = 'automatique'; return resolve(r); }
           catch(e){ W.all.reset(); fail(e); }
         }
-      } else if (W.all.ok(HC.AUTO_RATIO) && n === expected){
+      } else if (W.all.ok(HC.AUTO_RATIO) && n >= minFingers(step)){
         adv.force('Capture en cours…', 'Ne bougez pas.', 'good');
         burst = { count: 0, sharp: -1, seg: null, canvas: burstCanvas };
       }
@@ -1286,7 +1318,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v13 · 2 octobre 2026';
+const VERSION = 'v14 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
