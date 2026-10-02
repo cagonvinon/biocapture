@@ -1,7 +1,7 @@
 # Prototype — Module de capture biométrique (vote à distance)
 
 Page web unique (`index.html`) qui démontre le parcours de capture décrit dans le dossier de conception :
-contrôle du terminal → visage avec défi actif → empreintes sans contact, main posée sur une feuille blanche A4 (4 doigts de chaque main, puis chaque pouce : ordre 4-4-1-1) → chiffrement → effacement.
+contrôle du terminal → visage avec défi actif → empreintes sans contact, main posée sur un fond blanc (4 doigts de chaque main, puis chaque pouce : ordre 4-4-1-1) → chiffrement → effacement.
 
 **Ce que le prototype ne fait pas** : il ne compare rien au RNPP, son attestation d'intégrité est simulée,
 et ses modèles de détection du vivant sont des modèles publics non certifiés. Il sert à éprouver l'ergonomie,
@@ -21,17 +21,48 @@ La caméra n'est accessible qu'en HTTPS. Trois façons simples :
 3. **Poste de travail** : `npx serve .` puis `http://localhost:3000` dans Chrome (la webcam sert de caméra ;
    cocher « Tenter quand même la capture d'empreintes » pour essayer la main devant la webcam).
 
-Navigateur recommandé : Chrome Android (torche et mise au point pilotables). Sur iOS, Safari fonctionne
-mais n'expose ni la torche ni la mise au point.
+Navigateurs : Chrome sous Android ; sur iPhone, Safari ou Chrome, qui reposent tous deux sur le moteur WebKit
+(photo pleine définition disponible depuis iOS 18.4).
 
 Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en cache ensuite.
 
 ## Capture des empreintes
 
-Poser une feuille blanche A4 sur une table sombre, puis la main dessus, dos contre le papier.
-Téléphone en portrait : feuille en largeur devant soi, ses bords haut et bas visibles à l'écran.
-La distance entre ces deux bords (210 mm) donne l'échelle. Pour le papier US Letter, régler
-`CFG.SHEET.WIDTH_MM` à 215.9 ; pour une feuille A4 pliée en deux, à 148.5.
+Poser une feuille blanche (n'importe quel format) sur une table, puis la main dessus, dos contre le papier.
+La feuille ne sert que de fond uniforme : elle n'a pas besoin d'être entièrement visible.
+Doigts tendus vers le haut de l'écran et légèrement écartés. Rapprocher le téléphone jusqu'à ce que les
+doigts remplissent l'écran : la paume et le pouce peuvent sortir du cadre. Les doigts sont repérés par
+contraste avec le papier blanc ; l'échelle est estimée d'après la largeur des doigts.
+
+## Résolution : ce que permet le navigateur
+
+La norme vise 500 ppi (400 au minimum). Dans un navigateur, elle n'est pas atteignable sur tous les téléphones :
+les navigateurs anciens ne donnent accès qu'à une vidéo (le prototype demande la résolution maximale annoncée,
+4032 × 3024 sur iPhone ; depuis iOS 18.4, la photo est aussi disponible),
+et la caméra principale des iPhone Pro ne fait pas la mise au point en deçà d'environ 20 cm. On obtient alors
+de l'ordre de 150 ppi en 1080p, 300 ppi en 4K. Le prototype déclenche donc automatiquement à partir de
+250 ppi (130 ppi si la vidéo est limitée à 1080p) et marque la prise « sous la norme ». Une application native
+(photo 48 Mpx) atteint environ 700 ppi à la même distance.
+
+La capture est entièrement automatique : aucun bouton. Si les doigts ne sont pas retrouvés sur l'image,
+une vue de diagnostic s'affiche quatre secondes (en rouge ce qui a été pris pour de la peau, en vert les
+doigts retenus), puis la capture reprend.
+
+Objectif utilisé pour les doigts : la caméra principale par défaut. Pour essayer un autre objectif, ajouter
+`?objectif=tele` ou `?objectif=ultra` à l'adresse. Le journal indique la résolution réellement obtenue.
+
+## Acquisition complète et extraction
+
+L'acquisition est complète, comme à l'enrôlement : visage puis dix doigts (4-4-1-1). Seul le bouton
+« Doigt absent ou blessé » dispense d'une prise ; l'exception est consignée dans le paquet.
+
+Quelle que soit l'issue (tentatives épuisées, bouton « Arrêter », session expirée, erreur), le parcours
+se termine sur le récapitulatif : il montre ce qui a été capturé, y compris la meilleure image du visage
+non validée, et liste les éléments manquants avec leur motif. Un paquet incomplet peut être chiffré
+pour examen ; le service d'authentification simulé le reçoit intact mais refuse l'authentification.
+Au moment de la capture, le prototype extrait les minuties de chaque doigt (un doigt n'est exploitable
+qu'à partir de 12 minuties) et un gabarit facial qui sert à vérifier que la personne du défi est celle
+de la photo de référence. Le serveur refait sa propre extraction sur les images.
 
 ## Paramètres
 
