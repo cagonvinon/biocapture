@@ -154,7 +154,7 @@ details summary{cursor:pointer;font-weight:500}
   </div>
   <div class="chips" id="faceChips"></div>
   <div class="metrics" id="faceMetrics"></div>
-  <div class="cambar"><button class="btn ghost small" id="b-faceCancel">Abandonner</button><span class="spacer"></span><button class="btn small" id="b-faceShot" hidden style="width:auto">Prendre la photo</button><span class="step" id="faceAttempts" style="font:12px var(--mono);color:#9fb3a8"></span></div>
+  <div class="cambar"><button class="btn ghost small" id="b-faceCancel">Arrêter</button><span class="spacer"></span><button class="btn small" id="b-faceShot" hidden style="width:auto">Prendre la photo</button><span class="step" id="faceAttempts" style="font:12px var(--mono);color:#9fb3a8"></span></div>
 </section>
 
 <!-- 3. EMPREINTES -->
@@ -170,7 +170,7 @@ details summary{cursor:pointer;font-weight:500}
   <div class="chips" id="handChips"></div>
   <div class="metrics" id="handMetrics"></div>
   <div class="cambar">
-    <button class="btn ghost small" id="b-handCancel">Abandonner</button>
+    <button class="btn ghost small" id="b-handCancel">Arrêter</button>
     <button class="btn ghost small" id="b-torch" hidden>Torche</button>
     <span class="spacer"></span>
     <button class="btn ghost small" id="b-wasm" hidden>Changer de moteur</button>
@@ -183,8 +183,9 @@ details summary{cursor:pointer;font-weight:500}
 <main class="screen" id="s-revue" hidden>
   <div style="display:grid;gap:6px">
     <span class="eyebrow">Étape 4 sur 4</span>
-    <h1 style="font-size:22px">Captures prêtes à chiffrer</h1>
+    <h1 style="font-size:22px" id="revueTitre">Captures prêtes à chiffrer</h1>
     <p class="lead">Ces images n'existent qu'en mémoire. Elles ne sont jamais écrites dans la galerie ni sur le stockage du téléphone.</p>
+    <div class="result ko" id="revueBilan" hidden></div>
   </div>
   <section class="block">
     <h3>Visage</h3>
@@ -194,7 +195,7 @@ details summary{cursor:pointer;font-weight:500}
     <h3>Empreintes à 500 ppi et minuties extraites</h3>
     <div id="fingerThumbs" style="display:grid;gap:10px"></div>
     <details><summary>Journal de la session</summary><div class="log" id="journalRevue"></div></details>
-    <p class="note">Échelle estimée d'après la longueur des phalanges. Cercles rouges : terminaisons ; cercles bleus : bifurcations ; « m. » : nombre de minuties. Le serveur refait sa propre extraction.</p>
+    <p class="note">Échelle estimée d'après la largeur des doigts. Cercles rouges : terminaisons ; cercles bleus : bifurcations ; « m. » : nombre de minuties. Le serveur refait sa propre extraction.</p>
   </section>
   <div class="spacer"></div>
   <div class="row"><button class="btn ghost" id="b-restart" style="flex:1">Recommencer</button><button class="btn" id="b-seal" style="flex:2">Chiffrer le paquet</button></div>
@@ -634,7 +635,8 @@ async function runFace(){
   const steps = 1 + S.session.challenge.length;
   setProgress($('faceProgress'), steps, 0, 0);
   $('b-faceShot').hidden = true;
-  try { await openCamera(video, 'user', 1920, 1080); } catch(e){ adv.force('Caméra indisponible', e.name, 'alert'); return false; }
+  if (S.abort) return false;
+  try { await openCamera(video, 'user', 1920, 1080); } catch(e){ adv.force('Caméra indisponible', e.name, 'alert'); S.face.status = 'caméra frontale indisponible (' + e.name + ')'; return false; }
   const H = await getHuman();
   $('faceLoading').hidden = true;
   log(`caméra frontale ${video.videoWidth}×${video.videoHeight} — ${S.streams.at(-1).getVideoTracks()[0].label} — moteur ${BACKEND}`);
@@ -653,7 +655,8 @@ async function runFace(){
 
   const result = await new Promise((resolve) => {
     const loop = async () => {
-      if (!S.streams.length) return;
+      if (S.abort) return resolve({ abort: true });
+      if (!S.streams.length) return resolve(fail('caméra interrompue'));
       $('faceTimer').textContent = `session ${sessionLeft()} s`;
       if (sessionLeft() === 0) return resolve(fail('session expirée'));
       let res;
@@ -737,7 +740,7 @@ async function runFace(){
   if (result?.ok){
     const tok = faceToken(reference.frame, reference.M.eyeL, reference.M.eyeR);
     const mean = (a) => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
-    S.face.reference = { token: tok, metrics: reference.M, mode: reference.mode };
+    S.face.reference = { token: tok, metrics: reference.M, mode: reference.mode }; S.face.status = null; S.face.partial = null;
     S.face.challenge = challengeFrames;
     S.face.padSummary = { real: mean(S.face.pad.real), live: mean(S.face.pad.live), frames: S.face.pad.real.length };
     // Extraction des caractéristiques faciales : même personne du début à la fin du défi ?
@@ -752,13 +755,24 @@ async function runFace(){
     log(`visage terminé — PAD passif indicatif real=${S.face.padSummary.real?.toFixed(2)} live=${S.face.padSummary.live?.toFixed(2)}`);
     return true;
   }
+  // Échec ou arrêt : on conserve ce qui a été vu (meilleure image, défi partiel) pour le récapitulatif
+  const seen = reference || (bestAny.M ? { frame: keepCopy(bestAny.canvas), M: bestAny.M, mode: 'non validée' } : null);
+  if (seen){
+    let tok = null; try { tok = faceToken(seen.frame, seen.M.eyeL, seen.M.eyeR); } catch { tok = seen.frame; }
+    S.face.partial = { token: tok, metrics: seen.M, mode: reference ? reference.mode : 'non validée', conforme: !!reference, challenge: challengeFrames };
+  }
+  if (result?.abort){ S.face.status ||= 'capture arrêtée'; log('visage : capture arrêtée'); return false; }
+  if (sessionLeft() === 0){ S.face.status = 'session expirée'; return false; }
   if (S.face.attempts >= CFG.MAX_ATTEMPTS){
-    adv.force('Authentification impossible en ligne', 'Nombre maximal de tentatives atteint. Adressez-vous à la mission diplomatique.', 'alert');
-    log('visage : tentatives épuisées → orientation vers la mission diplomatique');
+    S.face.status = `tentatives épuisées (dernière : ${result})`;
+    adv.force('Visage non validé', 'Nombre maximal de tentatives atteint. La capture continue avec les empreintes ; le récapitulatif indiquera ce qui manque.', 'alert');
+    log('visage : tentatives épuisées → poursuite avec les empreintes, visage signalé au récapitulatif');
+    await new Promise(r=>setTimeout(r,3000));
     return false;
   }
   adv.force('Nouvelle tentative', result + '. Reprise dans 3 secondes.', 'alert');
   await new Promise(r=>setTimeout(r,3000));
+  if (S.abort){ S.face.status ||= 'capture arrêtée'; return false; }
   return runFace();
 }
 
@@ -1062,7 +1076,7 @@ async function runFingers(){
   show('s-doigts');
   const video = $('vHand');
   const facing = S.env.rear?.present ? 'environment' : 'user';
-  try { await openFingerCamera(video, facing); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
+  try { await openFingerCamera(video, facing); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); for (const st of STEPS) (S.handStatus ||= {})[st.id] = 'caméra arrière indisponible (' + e.name + ')'; return false; }
   $('handLoading').hidden = true;
   const stream = S.streams.at(-1);
   const tcap = stream.getVideoTracks()[0].getCapabilities?.() || {};
@@ -1072,6 +1086,7 @@ async function runFingers(){
   for (const step of STEPS){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
+      if (S.abort){ stopStreams(); return false; }
       if (S.streams.at(-1)?.getVideoTracks()[0]?.readyState !== 'live'){ stopStreams(); try { await openFingerCamera(video, facing); } catch(e){ log('caméra non rouverte : ' + e.name); } }
       const r = await captureHand(step);
       if (!r) return false;
@@ -1159,16 +1174,46 @@ async function faceEmbedding(img){
    --------------------------------------------------------------------- */
 function thumbHtml(id, label, q, cls){ return `<div class="thumb ${cls}"><div id="${id}"></div><div class="q"><span>${label}</span><b>${q}</b></div></div>`; }
 function mount(id, canvas){ const el = $(id); const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; c.getContext('2d').drawImage(canvas,0,0); S.canvases.push(c); el.appendChild(c); return c; }
+// Bilan de l'acquisition : ce qui est complet, partiel ou absent (sert au récapitulatif et au manifeste)
+function acquisitionBilan(){
+  const manque = [];
+  if (!S.face.reference) manque.push(`visage ${S.face.partial ? 'non validé' : 'non capturé'} (${S.face.status || 'aucune photo de référence'})`);
+  const prises = STEPS.filter(st => S.hands[st.id] && (S.hands[st.id].exception || S.hands[st.id].fingers?.length));
+  for (const st of STEPS) if (!prises.includes(st)) manque.push(`${st.label.toLowerCase()} : ${S.handStatus?.[st.id] || (S.abort ? 'capture arrêtée avant cette prise' : 'aucune prise enregistrée')}`);
+  const images = (S.face.reference || S.face.partial ? 1 : 0) + STEPS.reduce((s, st) => s + (S.hands[st.id]?.fingers?.length || 0), 0);
+  return { complet: !manque.length, manque, prises: prises.length, images, expiree: sessionLeft() === 0 };
+}
 function renderReview(){
+  stopStreams();
   show('s-revue');
-  const fr = S.face.reference;
-  $('faceThumbs').innerHTML = thumbHtml('ft0','référence', `IED ${fr.metrics.ied.toFixed(0)}`, 'ok') + S.face.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('');
-  mount('ft0', fr.token); S.face.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+  S.reviewShown = true;
+  const fr = S.face.reference, fp = S.face.partial;
+  if (fr){
+    $('faceThumbs').innerHTML = thumbHtml('ft0','référence', `IED ${fr.metrics.ied.toFixed(0)}`, 'ok') + S.face.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('');
+    mount('ft0', fr.token); S.face.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+  } else if (fp){
+    // visage vu mais non validé : on montre la meilleure image et les mouvements déjà réalisés
+    $('faceThumbs').innerHTML = thumbHtml('ft0', fp.conforme ? 'référence' : 'meilleure image', fp.conforme ? 'défi incomplet' : 'non conforme', 'ko') + fp.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('')
+      + `<p class="note" style="grid-column:1/-1">Visage non validé — ${S.face.status || 'motif inconnu'}.</p>`;
+    mount('ft0', fp.token); fp.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+  } else {
+    $('faceThumbs').innerHTML = `<p class="note" style="grid-column:1/-1">Visage non capturé — ${S.face.status || 'aucune image exploitable'}.</p>`;
+  }
+  const B = acquisitionBilan();
+  $('revueTitre').textContent = B.complet ? 'Captures prêtes à chiffrer' : 'Acquisition incomplète';
+  $('revueBilan').hidden = B.complet;
+  $('revueBilan').innerHTML = B.complet ? '' : `<strong>Éléments manquants</strong><br>${B.manque.join('<br>')}<br><br>`
+    + (B.expiree ? 'La session a expiré : le paquet ne serait plus accepté. Recommencez pour ouvrir une nouvelle session.'
+       : B.images ? 'Le paquet peut être chiffré pour examen ; le service d\'authentification le refusera tant que l\'acquisition n\'est pas complète.'
+       : 'Aucune image n\'a été retenue : il n\'y a rien à chiffrer.');
+  $('b-seal').disabled = B.expiree || !B.images;
+  $('b-seal').textContent = B.complet ? 'Chiffrer le paquet' : 'Chiffrer le paquet incomplet';
   // État de chaque prise, toujours affiché : capturée, exception, ou absente avec la raison connue
   const statusRow = (st) => { const h = S.hands[st.id], n = S.hands.attempts[st.id];
-    const etat = !h ? `non capturée — ${S.handStatus?.[st.id] || 'aucune prise enregistrée'}` : h.exception ? `exception : ${h.exception}` : `${h.fingers.length} image(s), ${h.good} exploitable(s), ${Math.round(h.ppi)} ppi, ${h.source}, capture ${h.mode || '—'}`;
+    const etat = !h ? `non capturée — ${S.handStatus?.[st.id] || (S.abort ? 'capture arrêtée avant cette prise' : 'aucune prise enregistrée')}` : h.exception ? `exception : ${h.exception}` : `${h.fingers.length} image(s), ${h.good} exploitable(s), ${Math.round(h.ppi)} ppi, ${h.source}, capture ${h.mode || '—'}`;
     return `<tr><td>${st.label}</td><td>${etat}</td><td>${n + (h && !h.exception ? 1 : 0)}</td></tr>`; };
-  const html = [`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)"><thead><tr><th align="left">Prise</th><th align="left">État</th><th align="left">Essais</th></tr></thead><tbody>${STEPS.map(statusRow).join('')}</tbody></table></div>`];
+  const faceRow = `<tr><td>Visage</td><td>${fr ? `validé, capture ${fr.mode}, défi ${S.face.challenge.length}/${S.session.challenge.length}` : `${fp ? 'non validé' : 'non capturé'} — ${S.face.status || 'aucune image exploitable'}`}</td><td>${S.face.attempts + (fr ? 1 : 0)}</td></tr>`;
+  const html = [`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)"><thead><tr><th align="left">Prise</th><th align="left">État</th><th align="left">Essais</th></tr></thead><tbody>${faceRow}${STEPS.map(statusRow).join('')}</tbody></table></div>`];
   for (const st of STEPS){
     const h = S.hands[st.id];
     if (!h?.fingers?.length) continue;
@@ -1196,19 +1241,23 @@ async function seal(){
     const bytes = await canvasBytes(canvas, type, q);
     images.push({ role, type, w: canvas.width, h: canvas.height, sha256: await sha256(bytes), size: bytes.length, ...meta, _bytes: bytes });
   };
-  await addImg('visage.reference', S.face.reference.token, 'image/jpeg', 0.92, { format:'ISO/IEC 39794-5 token frontal' });
-  for (const c of S.face.challenge) await addImg('visage.defi.'+c.action, c.frame, 'image/jpeg', 0.85, { t_ms:c.t_ms });
+  const fr = S.face.reference || S.face.partial, valide = !!S.face.reference;
+  const defi = S.face.reference ? S.face.challenge : (S.face.partial?.challenge || []);
+  if (fr) await addImg(valide ? 'visage.reference' : 'visage.non_valide', fr.token, 'image/jpeg', 0.92, { format:'ISO/IEC 39794-5 token frontal', valide });
+  for (const c of defi) await addImg('visage.defi.'+c.action, c.frame, 'image/jpeg', 0.85, { t_ms:c.t_ms });
   for (const st of STEPS) for (const f of (S.hands[st.id]?.fingers || []))
     await addImg('empreinte.'+f.code, f.crop, 'image/png', undefined, { position_iso: f.code, doigt: `${f.finger.fr} ${st.side==='droite'?'droit':'gauche'}`, ppi: 500, qualite: f.q, minuties_terminal: f.ext ? f.ext.minutiae.map(m => [m.x, m.y, m.a, m.t]) : [] });
-  const m = S.face.reference.metrics;
+  const m = fr?.metrics, B = acquisitionBilan();
   const manifest = {
     version: 'capture/1.0',
+    acquisition: { complete: B.complet, elements_manquants: B.manque },
     session: { id: sess.id, nonce: sess.nonce, cle_serveur: sess.serverKid, horodatage: new Date().toISOString() },
     electeur: { npi: sess.npi },
     terminal: { plateforme: 'web-prototype', webdriver: S.env.webdriver, cameras: S.env.cameras, camera_virtuelle: S.env.virtualCamera, camera_active: S.env.activeLabel, arriere: S.env.rear, attestation: 'SIMULEE' },
     visage: {
-      capture_reference: S.face.reference.mode, qualite_reference: { ied_px: +m.ied.toFixed(1), lacet_deg: +m.yaw.toFixed(1), tangage_deg: +m.pitch.toFixed(1), roulis_deg: +m.roll.toFixed(1), luminance: +m.luma.toFixed(0), equilibre: +m.balance.toFixed(2), nettete: +m.sharp.toFixed(1) },
-      defi: { demande: sess.challenge, realise: S.face.challenge.map(c=>({ action:c.action, t_ms:c.t_ms })) },
+      valide, motif: valide ? null : (S.face.status || 'non capturé'),
+      capture_reference: fr?.mode || null, qualite_reference: m ? { ied_px: +m.ied.toFixed(1), lacet_deg: +m.yaw.toFixed(1), tangage_deg: +m.pitch.toFixed(1), roulis_deg: +m.roll.toFixed(1), luminance: +m.luma.toFixed(0), equilibre: +m.balance.toFixed(2), nettete: +m.sharp.toFixed(1) } : null,
+      defi: { demande: sess.challenge, realise: defi.map(c=>({ action:c.action, t_ms:c.t_ms })) },
       pad_passif_indicatif: S.face.padSummary,
       tentatives: S.face.attempts + 1,
       caracteristiques_terminal: S.face.features || null,
@@ -1262,6 +1311,7 @@ async function simulatedServer(env){
   if (p.manifest.session.nonce !== S.session.nonce) return { statut:'REJETE', motif:'nonce inconnu ou déjà utilisé' };
   if (Date.now() > S.session.expires) return { statut:'REJETE', motif:'session expirée' };
   for (const img of p.manifest.images){ const bytes = Uint8Array.from(atob(p.data[img.role]), c=>c.charCodeAt(0)); if (await sha256(bytes) !== img.sha256) return { statut:'REJETE', motif:'intégrité d\'une image' }; bytes.fill(0); }
+  if (!p.manifest.acquisition?.complete) return { statut:'REJETE', motif:'acquisition incomplète (' + p.manifest.acquisition.elements_manquants.length + ' élément(s) manquant(s)) — paquet reçu intact, conservé pour examen, authentification refusée' };
   return { statut:'RECU', images: p.manifest.images.length, verification: 'Signature, nonce, délai et intégrité des images vérifiés.', comparaison: 'Comparaison au RNPP : hors du périmètre du prototype.' };
 }
 
@@ -1275,7 +1325,7 @@ function wipe(){
   let bytes = 0; for (const b of S.buffers){ bytes += b.length; b.fill(0); } lines.push(`${S.buffers.length} tampons binaires écrasés (${(bytes/1024).toFixed(0)} Ko)`);
   if (S.sealed){ S.sealed.ct.fill(0); lines.push('paquet chiffré écrasé après accusé de réception'); }
   stopStreams(); lines.push('flux caméra arrêtés');
-  S.canvases = []; S.buffers = []; S.face.reference = null; S.face.challenge = []; for (const st of STEPS) S.hands[st.id] = null; S.sealed = null; S.session.nonce = null;
+  S.canvases = []; S.buffers = []; S.face.reference = null; S.face.partial = null; S.face.challenge = []; for (const st of STEPS) S.hands[st.id] = null; S.sealed = null; S.session.nonce = null;
   lines.push('nonce de session invalidé — aucune image n\'a été écrite sur le stockage');
   document.querySelectorAll('#faceThumbs,#fingerThumbs').forEach(e=>e.innerHTML='');
   log('effacement terminé');
@@ -1295,14 +1345,26 @@ $('b-start').onclick = async () => {
   getHuman().catch(e => log('chargement des modèles impossible : '+e.message));
   await checkTerminal();
 };
+// Quelle que soit l'issue (succès, échec, arrêt, session expirée, erreur), on termine sur le récapitulatif
 $('b-toFace').onclick = async () => {
-  const ok = await runFace();
-  if (!ok){ $('b-faceCancel').textContent = 'Terminer'; return; }
-  await runFingers();   // acquisition complète : visage + dix doigts, comme à l'enrôlement ; le récapitulatif dit ce qui manque
-  renderReview();
+  S.abort = false; S.reviewShown = false;
+  try {
+    const ok = await runFace();
+    if (!ok) log('visage non validé — ' + (S.face.status || 'motif inconnu'));
+    // acquisition complète : visage + dix doigts, comme à l'enrôlement ; le récapitulatif dit ce qui manque
+    if (!S.abort && sessionLeft() > 0) await runFingers();
+    else if (sessionLeft() === 0) for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = 'session expirée';
+  } catch(e){ log('acquisition interrompue : ' + e.message); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] ||= 'erreur : ' + e.message; }
+  try { renderReview(); } catch(e){ log('récapitulatif : ' + e.message); show('s-revue'); $('journalRevue').textContent = journal.join('\n'); }
 };
-$('b-faceCancel').onclick = () => { stopStreams(); log('capture du visage abandonnée'); location.reload(); };
-$('b-handCancel').onclick = () => { stopStreams(); log('capture des empreintes abandonnée'); location.reload(); };
+const stopToReview = (what) => {
+  if (S.abort) return;
+  S.abort = true; stopStreams(); log(`${what} : capture arrêtée — passage au récapitulatif`);
+  // les boucles de capture se terminent d'elles-mêmes ; filet de sécurité si l'une d'elles est bloquée
+  setTimeout(() => { if (!S.reviewShown) renderReview(); }, 2500);
+};
+$('b-faceCancel').onclick = () => stopToReview('visage');
+$('b-handCancel').onclick = () => stopToReview('empreintes');
 $('b-restart').onclick = () => location.reload();
 $('b-seal').onclick = async () => { $('b-seal').disabled = true; await seal(); };
 $('b-send').onclick = async () => {
@@ -1318,7 +1380,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v14 · 2 octobre 2026';
+const VERSION = 'v15 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
