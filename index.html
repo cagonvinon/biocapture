@@ -258,7 +258,7 @@ const CFG = {
     PPI_AUTO_1080: 130,        // idem quand le navigateur ne fournit que de la vidéo 1080p (Safari, iPhone)
     SHARP_REL: 0.6,            // netteté (indicative) : au moins 60 % de la meilleure netteté vue pendant la prise
     BURST_FRAMES: 6,           // rafale au déclenchement : on garde la plus nette des 6 images
-    PHOTO_MIN_PX: 4000,        // grand côté de la photo pour un terminal apte (≈ 12 Mpx)
+    PHOTO_MIN_PX: 3264,        // grand côté de la photo pour un terminal apte (≈ 8 Mpx, avec mise au point automatique)
     PHOTO_FACTOR_DEFAULT: 2,   // rapport photo / vidéo supposé si le navigateur ne l'annonce pas
     SEG_W: 360,                // résolution de travail du repérage des doigts (petit côté, px)
     SKIN_LUMA: 0.80,           // peau : luminance < 80 % de celle du papier (ou couleur saturée)
@@ -382,7 +382,7 @@ async function checkTerminal(){
   } else {
     const best = Math.max(maxW, S.env.rear.photoMax || 0);
     const okRes = best >= CFG.HAND.PHOTO_MIN_PX;
-    add(okRes?'ok':'warn','Caméra arrière', okRes? `Photo jusqu'à ${best} px sur le grand côté (environ 12 Mpx ou plus).` : `Moins de ${CFG.HAND.PHOTO_MIN_PX} px annoncés : les empreintes seront capturées mais risquent d'être signalées comme de résolution insuffisante.`, `${best} px`);
+    add(okRes?'ok':'warn','Caméra arrière', okRes? `Photo jusqu'à ${best} px sur le grand côté (8 Mpx ou plus) : 500 ppi atteignables vers 10–12 cm si la mise au point suit.` : `Moins de ${CFG.HAND.PHOTO_MIN_PX} px annoncés : les empreintes seront capturées mais risquent d'être signalées comme de résolution insuffisante.`, `${best} px`);
     add(torch?'ok':'warn','Torche', torch? 'Pilotable : éclairage homogène des crêtes.' : 'Non pilotable depuis le navigateur. Prévoir une lumière forte.', torch?'oui':'non');
     add(af===false?'warn':'ok','Mise au point continue', af===null? 'Information non exposée par le navigateur.' : (af? 'Disponible.' : 'Absente : risque de flou à courte distance.'), af===null?'inconnu':(af?'oui':'non'));
   }
@@ -944,7 +944,7 @@ async function captureHand(step){
   $('b-handShot').hidden = true;
   const HC = CFG.HAND, N = HC.WINDOW;
   const W = { nombre:new Win(N), resolution:new Win(N), entiers:new Win(N), stable:new Win(N), net:new Win(N), all:new Win(N) };
-  let bestSharp = 0, burst = null; const burstCanvas = null;
+  let bestSharp = 0, burst = null, fps = 0, lastT = 0; const burstCanvas = null;
   let prevTips = null, manual = false, last = null, paused = false;
   const tStart = performance.now();
   return new Promise((resolve) => {
@@ -993,7 +993,8 @@ async function captureHand(step){
       if (n === expected) last = { fingers: seg.fingers };
       const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
       chips($('handChips'), [[`${n}/${expected} doigt${expected>1?'s':''}`, ck('nombre','ko')], [`≈ ${ppiPhoto ? Math.round(ppiPhoto) : '—'} ppi`, ck('resolution')], ['doigts entiers', ck('entiers')], ['net', ck('net')], ['stable', ck('stable')]]);
-      $('handMetrics').innerHTML = `papier <b>${seg.paper}</b> seuil peau <b>${seg.thr}</b> peau <b>${Math.round(seg.skinShare*100)} %</b> bandes <b>${seg.found}</b> `
+      const now = performance.now(); fps = fps ? fps*0.8 + 0.2*(1000/Math.max(1, now - lastT)) : 0; lastT = now;
+      $('handMetrics').innerHTML = `${fps ? `<b>${fps.toFixed(0)}</b> img/s ` : ''}papier <b>${seg.paper}</b> seuil peau <b>${seg.thr}</b> peau <b>${Math.round(seg.skinShare*100)} %</b> bandes <b>${seg.found}</b> `
         + (ppiNow ? `aperçu <b>${Math.round(ppiNow)} ppi</b> × ${photoFactor.toFixed(1)} ` : '') + `vidéo <b>${vw}×${vh}</b>`;
 
       if (!W.nombre.ok(0.5)){
@@ -1285,7 +1286,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v12 · 2 octobre 2026';
+const VERSION = 'v13 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
