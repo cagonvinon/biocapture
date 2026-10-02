@@ -999,13 +999,17 @@ async function captureStill(video, step, preview, fallback){
 async function captureHand(step){
   const video = $('vHand'), ov = $('oHand'), adv = makeAdvisor($('handInstr'));
   const expected = step.fingers.length;
-  $('handStep').textContent = `${step.label.toLowerCase()} · tentative ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
+  const done = STEPS.filter(st => S.hands[st.id]).length;
+  $('handStep').textContent = `visage ${S.face.reference ? '✓' : '✗'} · prises ${done}/4 · ${step.label.toLowerCase()} · essai ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
   adv.force(...stepIntro(step));
   $('b-handShot').hidden = true;
   const HC = CFG.HAND, N = HC.WINDOW;
   const W = { nombre:new Win(N), resolution:new Win(N), entiers:new Win(N), stable:new Win(N), net:new Win(N), all:new Win(N) };
   let bestSharp = 0, burst = null, fps = 0, lastT = 0; const burstCanvas = null;
-  let prevTips = null, manual = false, last = null, paused = false, lowRetries = 0;
+  let prevTips = null, manual = false, last = null, paused = false, lowRetries = 0, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0;
+  let frameCount = 0; const gen = S.handGen = (S.handGen || 0) + 1;
+  const onFrame = () => { frameCount++; if (S.handGen === gen && !S.abort) video.requestVideoFrameCallback(onFrame); };
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
   const tStart = performance.now();
   return new Promise((resolve) => {
     let skip = null;
@@ -1026,9 +1030,28 @@ async function captureHand(step){
     };
     const loop = async () => {
       if (stopped) return;
+      if (S.abort) return resolve(null);
       if (!S.streams.length) return resolve(null);
       if (skip) return resolve({ exception: skip });
       if (paused){ requestAnimationFrame(loop); return; }
+      // aperçu vide ou figé (constaté sur iPhone après la photo pleine définition) : réouverture automatique
+      // images reçues : compteur requestVideoFrameCallback quand il existe (WebKit ≥ 15.4), sinon currentTime
+      const vt = video.requestVideoFrameCallback ? frameCount : video.currentTime, nowW = performance.now();
+      if (vt !== lastVT){ lastVT = vt; frozenSince = nowW; }
+      const healthy = cameraHealthy(video) && nowW - frozenSince < 2500;
+      if (!healthy){
+        stallSince ||= nowW;
+        if (nowW - stallSince > 1200){
+          adv.force('Réouverture de la caméra…', 'L\'aperçu s\'est interrompu. Gardez la main en place.', 'alert');
+          video.play().catch(()=>{});
+          const ok = await reviveFingerCamera(cameraHealthy(video) ? 'aperçu figé' : `aperçu vide (vidéo ${video.videoWidth}×${video.videoHeight})`);
+          if (S.abort) return resolve(null);
+          if (!ok && ++revives >= 3) return resolve({ error: 'caméra arrière interrompue et non rouverte' });
+          stallSince = 0; frozenSince = performance.now(); W.all.reset(); burst = null; adv.force(...stepIntro(step));
+        }
+        requestAnimationFrame(loop); return;
+      }
+      stallSince = 0;
       if (sessionLeft() === 0) return resolve({ error:'session expirée' });
       const vw = video.videoWidth, vh = video.videoHeight;
       const seg = segmentFingers(video, vw, vh, expected);
@@ -1097,22 +1120,39 @@ async function captureHand(step){
     requestAnimationFrame(loop);
   });
 }
+// Caméra des doigts : état et réouverture. Sur iPhone, la photo pleine définition reconfigure le capteur ;
+// l'aperçu peut rester figé ou vide (vidéo 0 × 0) alors que la piste se dit active : on le détecte et on rouvre.
+let fingerCam = null;
+function cameraHealthy(video){
+  const tr = S.streams.at(-1)?.getVideoTracks()[0];
+  return !!(tr && tr.readyState === 'live' && !tr.muted && video.videoWidth > 0 && video.readyState >= 2);
+}
+async function reviveFingerCamera(why){
+  if (!fingerCam || S.abort) return false;
+  const { video, facing } = fingerCam; const torch = torchOn;
+  log(`caméra des doigts rouverte — ${why}`);
+  stopStreams();
+  try { await openFingerCamera(video, facing); } catch(e){ log('réouverture impossible : ' + e.name); return false; }
+  if (S.abort){ stopStreams(); return false; }
+  if (torch) await setTorch(S.streams.at(-1), true);
+  return cameraHealthy(video);
+}
 async function runFingers(){
   show('s-doigts');
   const video = $('vHand');
-  const facing = S.env.rear?.present ? 'environment' : 'user';
+  const facing = S.env.rear?.present ? 'environment' : 'user'; fingerCam = { video, facing };
   try { await openFingerCamera(video, facing); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); for (const st of STEPS) (S.handStatus ||= {})[st.id] = 'caméra arrière indisponible (' + e.name + ')'; return false; }
   $('handLoading').hidden = true;
   const stream = S.streams.at(-1);
   const tcap = stream.getVideoTracks()[0].getCapabilities?.() || {};
-  if (tcap.torch){ $('b-torch').hidden = false; await setTorch(stream, true); $('b-torch').onclick = () => setTorch(stream, !torchOn); }
+  if (tcap.torch){ $('b-torch').hidden = false; await setTorch(stream, true); $('b-torch').onclick = () => setTorch(S.streams.at(-1), !torchOn); }
   if (Array.isArray(tcap.focusMode) && tcap.focusMode.includes('continuous')){ try { await stream.getVideoTracks()[0].applyConstraints({ advanced:[{ focusMode:'continuous' }] }); } catch {} }
   log(`caméra ${facing==='environment'?'arrière':'frontale (démonstration)'} ${video.videoWidth}×${video.videoHeight}, torche ${torchOn}, photo pleine résolution ${window.ImageCapture ? 'disponible' : 'indisponible'}`);
   for (const step of STEPS){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
       if (S.abort){ stopStreams(); return false; }
-      if (S.streams.at(-1)?.getVideoTracks()[0]?.readyState !== 'live'){ stopStreams(); try { await openFingerCamera(video, facing); } catch(e){ log('caméra non rouverte : ' + e.name); } }
+      if (!cameraHealthy(video)) await reviveFingerCamera('aperçu interrompu avant la prise');
       const r = await captureHand(step);
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = r.error; stopStreams(); return false; }
@@ -1419,8 +1459,8 @@ $('b-send').onclick = async () => {
 $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
-if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v16 · 2 octobre 2026';
+if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+const VERSION = 'v17 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
