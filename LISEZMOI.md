@@ -44,6 +44,10 @@ de l'ordre de 150 ppi en 1080p, 300 ppi en 4K. Le prototype déclenche donc auto
 250 ppi (130 ppi si la vidéo est limitée à 1080p) et marque la prise « sous la norme ». Une application native
 (photo 48 Mpx) atteint environ 700 ppi à la même distance.
 
+La photo est demandée à la définition maximale annoncée par le capteur (sans cette précision, WebKit rend une
+photo à la taille de la vidéo). Le rapport réel photo / vidéo est mesuré à la première prise et remplace
+l'estimation ; si la résolution mesurée sur la photo reste sous le seuil, la prise est refaite automatiquement.
+
 La capture est entièrement automatique : aucun bouton. Si les doigts ne sont pas retrouvés sur l'image,
 une vue de diagnostic s'affiche quatre secondes (en rouge ce qui a été pris pour de la peau, en vert les
 doigts retenus), puis la capture reprend.
@@ -60,8 +64,9 @@ Quelle que soit l'issue (tentatives épuisées, bouton « Arrêter », session e
 se termine sur le récapitulatif : il montre ce qui a été capturé, y compris la meilleure image du visage
 non validée, et liste les éléments manquants avec leur motif. Un paquet incomplet peut être chiffré
 pour examen ; le service d'authentification simulé le reçoit intact mais refuse l'authentification.
-Au moment de la capture, le prototype extrait les minuties de chaque doigt (un doigt n'est exploitable
-qu'à partir de 12 minuties) et un gabarit facial qui sert à vérifier que la personne du défi est celle
+Au moment de la capture, le prototype extrait les minuties de chaque doigt après normalisation locale du
+contraste et lissage le long des crêtes, ce qui rend l'extraction indépendante du teint de la peau ; un doigt
+est exploitable à partir de 12 minuties sur au moins 60 mm² de crêtes lisibles et un gabarit facial qui sert à vérifier que la personne du défi est celle
 de la photo de référence. Le serveur refait sa propre extraction sur les images.
 
 ## Paramètres

@@ -268,6 +268,8 @@ const CFG = {
     MIN_GOOD: { quatre: 2, pouce: 1 }, // doigts exploitables requis par prise
     MIN_DETECTED: 3,           // la prise des quatre doigts se déclenche dès 3 doigts repérés ; le doigt manquant est consigné
     MIN_MINUTIAE: 12,          // minuties fiables requises pour qu'un doigt soit exploitable
+    COHERENCE_MIN: 0.45,
+    MIN_AREA_MM2: 60,          // surface de crêtes lisibles minimale (mm²) pour un doigt exploitable       // cohérence d'orientation minimale : écarte le bruit du fond et les zones floues
   },
   // longueur approximative articulation distale → extrémité (mm), adulte
   PHALANX_MM: { index: 22, middle: 23, ring: 22, pinky: 19, thumb: 25 },
@@ -504,7 +506,7 @@ async function openFingerCamera(video, facing){
   const mw = caps.width?.max, mh = caps.height?.max;
   // montée en résolution seulement si elle n'aboutit pas à une image plus petite (l'essai du 2 octobre a montré un recul en 1080p)
   const before = Math.min(video.videoWidth, video.videoHeight);
-  if (mw && mh && Math.max(video.videoWidth, video.videoHeight) < Math.max(mw, mh)){
+  if (mw && mh && before < 2160 && Math.max(video.videoWidth, video.videoHeight) < Math.max(mw, mh)){
     try { await tr.applyConstraints({ width:{ ideal: Math.max(mw,mh) }, height:{ ideal: Math.min(mw,mh) } }); await new Promise(r => setTimeout(r, 500)); } catch(e){ log('résolution maximale refusée : ' + e.name); }
     if (Math.min(video.videoWidth, video.videoHeight) < before){ try { await tr.applyConstraints({ width:{ ideal:3840 }, height:{ ideal:2160 } }); await new Promise(r => setTimeout(r, 500)); } catch {} log('résolution maximale moins bonne : retour au 4K'); }
   }
@@ -943,7 +945,10 @@ async function processImage(img, step, source, mapped){
   const fingers = seg.fingers.map((sf, i) => {
     const f = keys[i]; const crop = cropSeg(img, sf, ppi);
     const gray = toGray(crop), q = fingerQuality(crop), ext = extractMinutiae(gray);
-    q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.exploitable = q.exploitable && ext.count >= CFG.HAND.MIN_MINUTIAE;
+    q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.coherence = ext.coherence;
+    // décision fondée sur les crêtes elles-mêmes (minuties, surface utile, reflets), pas sur le contraste brut,
+    // qui pénalisait les peaux foncées : la normalisation locale rend les crêtes lisibles quel que soit le teint
+    q.exploitable = q.glare < 0.12 && ext.count >= CFG.HAND.MIN_MINUTIAE && ext.area_mm2 >= CFG.HAND.MIN_AREA_MM2;
     return { finger: f, code: f.code[step.side], crop: gray, enhanced: ridgeEnhance(crop), q, ext };
   }).sort((p,q) => step.fingers.indexOf(p.finger) - step.fingers.indexOf(q.finger));
   const overview = makeDiag(img, { fingers: seg.fingers });
@@ -967,7 +972,16 @@ async function captureStill(video, step, preview, fallback){
         const cx = tips.reduce((a,f)=>a+f.tip[0],0)/tips.length/vw, cy = Math.min(0.95, tips.reduce((a,f)=>a+f.tip[1]+f.w,0)/tips.length/vh);
         try { await track.applyConstraints({ advanced:[{ pointsOfInterest:[{ x:cx, y:cy }] }] }); await new Promise(r=>setTimeout(r,500)); } catch {}
       }
-      let img = await loadImage(await new ImageCapture(track).takePhoto());
+      // Sans réglages explicites, WebKit rend une photo à la taille de la vidéo (1080 × 1920 à l'essai du 2 octobre) :
+      // on demande la définition maximale annoncée par le capteur
+      const ic = new ImageCapture(track); let ps = {};
+      try { const pc = await ic.getPhotoCapabilities(); if (pc.imageWidth?.max && pc.imageHeight?.max) ps = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max }; } catch {}
+      let blob; try { blob = await ic.takePhoto(ps); } catch(e){ if (!ps.imageWidth) throw e; log('photo aux dimensions maximales refusée (' + e.name + '), nouvel essai sans réglage'); blob = await ic.takePhoto(); }
+      let img = await loadImage(blob);
+      // rapport réel photo / vidéo, mesuré : il remplace l'estimation pour les prises suivantes
+      const ratio = Math.max(img.width, img.height) / Math.max(vw, vh);
+      if (S.env.photoRatio !== ratio) log(`photo du navigateur : ${img.width}×${img.height} px (demandé ${ps.imageWidth || '—'}×${ps.imageHeight || '—'}), soit ${ratio.toFixed(2)} × la vidéo`);
+      S.env.photoRatio = ratio;
       if ((img.width > img.height) !== (vw > vh)) img = rotate90(img, 1);
       // la vidéo est un recadrage du capteur : on ramène la photo au même champ que l'aperçu
       const av = vw/vh, ap = img.width/img.height; let cw = img.width, ch = img.height;
@@ -991,7 +1005,7 @@ async function captureHand(step){
   const HC = CFG.HAND, N = HC.WINDOW;
   const W = { nombre:new Win(N), resolution:new Win(N), entiers:new Win(N), stable:new Win(N), net:new Win(N), all:new Win(N) };
   let bestSharp = 0, burst = null, fps = 0, lastT = 0; const burstCanvas = null;
-  let prevTips = null, manual = false, last = null, paused = false;
+  let prevTips = null, manual = false, last = null, paused = false, lowRetries = 0;
   const tStart = performance.now();
   return new Promise((resolve) => {
     let skip = null;
@@ -1020,7 +1034,7 @@ async function captureHand(step){
       const seg = segmentFingers(video, vw, vh, expected);
       const n = seg.fingers.length;
       const ppiNow = n ? segPpi(seg, step) : null;
-      const vLong = Math.max(vw, vh), photoFactor = !window.ImageCapture ? 1 : S.env.rear?.photoMax ? Math.max(1, S.env.rear.photoMax / vLong) : HC.PHOTO_FACTOR_DEFAULT;
+      const vLong = Math.max(vw, vh), photoFactor = !window.ImageCapture ? 1 : S.env.photoRatio ? Math.max(1, S.env.photoRatio) : S.env.rear?.photoMax ? Math.max(1, S.env.rear.photoMax / vLong) : HC.PHOTO_FACTOR_DEFAULT;
       const ppiPhoto = ppiNow ? ppiNow * photoFactor : null;
       const tips = seg.fingers.map(f => f.tip);
       let moved = 1; if (n >= minFingers(step) && prevTips?.length === n) moved = Math.max(...tips.map((p,i)=>dist(p,prevTips[i])))/vw;
@@ -1060,7 +1074,18 @@ async function captureHand(step){
         if (++burst.count >= HC.BURST_FRAMES){
           const b = burst; burst = null;
           log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté retenue ${b.sharp.toFixed(0)}`);
-          try { const r = await captureStill(video, step, b.seg || last, b.canvas); r.mode = 'automatique'; return resolve(r); }
+          try {
+            const r = await captureStill(video, step, b.seg || last, b.canvas); r.mode = 'automatique';
+            // la résolution réelle de la photo prime sur l'estimation faite sur l'aperçu : si elle est nettement
+            // inférieure au seuil, la prise est refaite (deux fois au plus) avec l'estimation recalibrée
+            if (r.ppi < ppiAuto*0.9 && lowRetries < 2){
+              lowRetries++; W.all.reset(); burst = null;
+              log(`${step.label.toLowerCase()} : ${Math.round(r.ppi)} ppi réels sur la photo, en dessous du seuil de ${ppiAuto} — prise refaite`);
+              adv.force('Rapprochez un peu le téléphone', `Résolution mesurée sur la photo : ${Math.round(r.ppi)} ppi. Nouvelle prise automatique.`, 'alert');
+              requestAnimationFrame(loop); return;
+            }
+            return resolve(r);
+          }
           catch(e){ W.all.reset(); fail(e); }
         }
       } else if (W.all.ok(HC.AUTO_RATIO) && n >= minFingers(step)){
@@ -1105,28 +1130,46 @@ async function runFingers(){
 
 /* ---------------------------------------------------------------------
    Extraction des caractéristiques sur le terminal (contrôle de qualité)
-   Minuties : normalisation locale → binarisation → squelette (Zhang-Suen)
+   Minuties : normalisation locale → zone du doigt → champ d'orientation
+   → lissage le long des crêtes → binarisation → squelette (Zhang-Suen)
    → nombre de croisements (1 = terminaison, 3 = bifurcation) → orientation
    par tenseur de structure. Format proche de l'ISO/IEC 19794-2 :
    x, y en pixels à 500 ppi, angle en degrés, type T (terminaison) ou B (bifurcation).
    Le serveur refait sa propre extraction : celle-ci sert à juger la qualité.
    --------------------------------------------------------------------- */
 function extractMinutiae(gray){
-  const W = gray.width, H = gray.height;
+  const W = gray.width, H = gray.height, N = W*H;
   const d = gray.getContext('2d', { willReadFrequently:true }).getImageData(0,0,W,H).data;
-  const g = new Float32Array(W*H); for (let i=0,j=0;i<g.length;i++,j+=4) g[i] = d[j];
+  const g = new Float32Array(N); for (let i=0,j=0;i<N;i++,j+=4) g[i] = d[j+1];
   const integ = (src) => { const I = new Float64Array((W+1)*(H+1)); for (let y=0;y<H;y++){ let rs=0; for (let x=0;x<W;x++){ rs += src[y*W+x]; I[(y+1)*(W+1)+x+1] = I[y*(W+1)+x+1] + rs; } } return I; };
   const box = (I, x, y, r) => { const x0=Math.max(0,x-r), x1=Math.min(W,x+r+1), y0=Math.max(0,y-r), y1=Math.min(H,y+r+1); return [I[y1*(W+1)+x1]-I[y0*(W+1)+x1]-I[y1*(W+1)+x0]+I[y0*(W+1)+x0], (x1-x0)*(y1-y0)]; };
-  const g2 = g.map(v=>v*v); const I1 = integ(g), I2 = integ(g2);
-  const norm = new Float32Array(W*H), fg = new Uint8Array(W*H);
-  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const [s,n] = box(I1,x,y,8), [s2] = box(I2,x,y,8); const m = s/n, sd = Math.sqrt(Math.max(0, s2/n - m*m)); const i = y*W+x; norm[i] = (g[i]-m)/(sd+1); fg[i] = sd > 6 ? 1 : 0; }
-  // zone utile : avant-plan contrasté, rognée de 12 px pour écarter les bords
-  const IF = integ(fg); const margin = 16; const core = new Uint8Array(W*H);
-  for (let y=margin;y<H-margin;y++) for (let x=margin;x<W-margin;x++){ const [s,n] = box(IF,x,y,margin); core[y*W+x] = s === n ? 1 : 0; }
-  // lissage 3×3 puis binarisation (sans contact : crêtes plus claires que les vallées)
-  const bin = new Uint8Array(W*H);
-  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ let s=0; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) s += norm[(y+dy)*W+x+dx]; bin[y*W+x] = fg[y*W+x] && s > 0 ? 1 : 0; }
-  // squelettisation de Zhang-Suen
+  const pct = (arr, p) => { const s = Array.from(arr).filter((_,i)=>!(i%7)).sort((a,b)=>a-b); return s[Math.min(s.length-1, Math.floor(p*s.length))] || 0; };
+  // 1. normalisation locale : rend l'extraction indépendante du contraste (peau foncée, faible éclairage)
+  const I1 = integ(g), I2 = integ(g.map(v=>v*v));
+  const norm = new Float32Array(N), sd = new Float32Array(N), mBig = new Float32Array(N);
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; const [s,n] = box(I1,x,y,8), [s2] = box(I2,x,y,8); const m = s/n; sd[i] = Math.sqrt(Math.max(0, s2/n - m*m)); norm[i] = (g[i]-m)/(sd[i]+0.5); const [sb,nb] = box(I1,x,y,16); mBig[i] = sb/nb; }
+  // 2. zone du doigt : plus sombre que le papier (s'il y en a) et contraste de crêtes relatif suffisant
+  const paperLvl = pct(mBig, 0.95), medLvl = pct(mBig, 0.5), sdRef = pct(sd, 0.9);
+  const usePaper = paperLvl - medLvl > 15;
+  const fg = new Uint8Array(N);
+  for (let i=0;i<N;i++) fg[i] = (!usePaper || mBig[i] < paperLvl*0.85) && sd[i] > Math.max(0.6, 0.22*sdRef) ? 1 : 0;
+  // 3. champ d'orientation (tenseur de structure lissé) et cohérence
+  const gx = new Float32Array(N), gy = new Float32Array(N);
+  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x, n=norm; gx[i] = (n[i-W+1]+2*n[i+1]+n[i+W+1]) - (n[i-W-1]+2*n[i-1]+n[i+W-1]); gy[i] = (n[i+W-1]+2*n[i+W]+n[i+W+1]) - (n[i-W-1]+2*n[i-W]+n[i-W+1]); }
+  const Jxx = integ(gx.map((v)=>v*v)), Jyy = integ(gy.map(v=>v*v)), Jxy = integ(gx.map((v,i)=>v*gy[i]));
+  const theta = new Float32Array(N), coh = new Float32Array(N);
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; const [a] = box(Jxx,x,y,8), [b] = box(Jyy,x,y,8), [c] = box(Jxy,x,y,8);
+    theta[i] = 0.5*Math.atan2(2*c, a-b) + Math.PI/2; coh[i] = (a+b) > 0 ? Math.sqrt((a-b)*(a-b) + 4*c*c)/(a+b) : 0; }
+  // 4. lissage le long des crêtes : referme les coupures dues au bruit sans fusionner les crêtes voisines
+  const sm = new Float32Array(N);
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){ const i=y*W+x; if (!fg[i]) continue; const cx = Math.cos(theta[i]), cy = Math.sin(theta[i]); let s=0, n=0;
+    for (let t=-5;t<=5;t++){ const xi = Math.round(x+t*cx), yi = Math.round(y+t*cy); if (xi<0||yi<0||xi>=W||yi>=H) continue; s += norm[yi*W+xi]; n++; } sm[i] = s/n; }
+  const bin = new Uint8Array(N);
+  for (let i=0;i<N;i++) bin[i] = fg[i] && sm[i] > 0 ? 1 : 0;
+  // 5. zone utile : avant-plan érodé (les bords du doigt créent de fausses terminaisons) et orientation cohérente
+  const IF = integ(fg); const margin = 12; const core = new Uint8Array(N);
+  for (let y=margin;y<H-margin;y++) for (let x=margin;x<W-margin;x++){ const i=y*W+x; const [s,n] = box(IF,x,y,margin); core[i] = s === n && coh[i] > CFG.HAND.COHERENCE_MIN ? 1 : 0; }
+  // 6. squelettisation de Zhang-Suen
   const P = (i) => [bin[i-W], bin[i-W+1], bin[i+1], bin[i+W+1], bin[i+W], bin[i+W-1], bin[i-1], bin[i-W-1]];
   let changed = true, guard = 0;
   while (changed && guard++ < 40){
@@ -1139,21 +1182,18 @@ function extractMinutiae(gray){
       if (del.length){ changed = true; for (const i of del) bin[i] = 0; }
     }
   }
-  // gradients pour l'orientation locale
-  const gx = new Float32Array(W*H), gy = new Float32Array(W*H);
-  for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; gx[i] = (g[i-W+1]+2*g[i+1]+g[i+W+1]) - (g[i-W-1]+2*g[i-1]+g[i+W-1]); gy[i] = (g[i+W-1]+2*g[i+W]+g[i+W+1]) - (g[i-W-1]+2*g[i-W]+g[i-W+1]); }
-  const orient = (x,y) => { let xx=0, yy=0, xy=0; for (let dy=-6;dy<=6;dy++) for (let dx=-6;dx<=6;dx++){ const xi=x+dx, yi=y+dy; if (xi<1||yi<1||xi>=W-1||yi>=H-1) continue; const i=yi*W+xi; xx+=gx[i]*gx[i]; yy+=gy[i]*gy[i]; xy+=gx[i]*gy[i]; } return 0.5*Math.atan2(2*xy, xx-yy) + Math.PI/2; };
-  // nombre de croisements
+  // 7. nombre de croisements (1 = terminaison, 3 = bifurcation)
   let list = [];
   for (let y=1;y<H-1;y++) for (let x=1;x<W-1;x++){ const i=y*W+x; if (!bin[i] || !core[i]) continue; const p = P(i);
     let cn = 0; for (let k=0;k<8;k++) cn += Math.abs(p[k] - p[(k+1)%8]); cn /= 2;
     if (cn === 1 || cn === 3) list.push({ x, y, t: cn === 1 ? 'T' : 'B' }); }
-  // élimination des fausses minuties : paires trop proches (épines, ponts, coupures)
+  // 8. fausses minuties : paires trop proches (épines, ponts, coupures, petits îlots)
   const drop = new Set();
-  for (let a=0;a<list.length;a++) for (let b=a+1;b<list.length;b++){ if (Math.hypot(list[a].x-list[b].x, list[a].y-list[b].y) < 8){ drop.add(a); drop.add(b); } }
-  list = list.filter((_,i)=>!drop.has(i)).map(m => ({ ...m, a: Math.round(orient(m.x,m.y)*180/Math.PI + 360) % 360 }));
-  const area = core.reduce((s,v)=>s+v,0) / (500/25.4)**2;   // surface utile en mm²
-  return { minutiae: list, count: list.length, area_mm2: +area.toFixed(1) };
+  for (let a=0;a<list.length;a++) for (let b=a+1;b<list.length;b++){ if (Math.hypot(list[a].x-list[b].x, list[a].y-list[b].y) < 9){ drop.add(a); drop.add(b); } }
+  list = list.filter((_,i)=>!drop.has(i)).map(m => ({ ...m, a: Math.round(theta[m.y*W+m.x]*180/Math.PI + 360) % 360 }));
+  let cs = 0, cn = 0; for (let i=0;i<N;i++) if (core[i]){ cs += coh[i]; cn++; }
+  const area = cn / (500/25.4)**2;   // surface utile en mm² (image à 500 ppi)
+  return { minutiae: list, count: list.length, area_mm2: +area.toFixed(1), coherence: cn ? +(cs/cn).toFixed(2) : 0 };
 }
 function drawMinutiae(canvas, ext){
   // tracé proportionnel à l'image, pour rester lisible une fois la vignette réduite à l'écran
@@ -1380,7 +1420,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v15 · 2 octobre 2026';
+const VERSION = 'v16 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
