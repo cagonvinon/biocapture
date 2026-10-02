@@ -256,7 +256,8 @@ const CFG = {
     PPI_TARGET: 500, PPI_MIN: 400, PPI_MAX: 1400,
     PPI_AUTO: 250,             // déclenchement du prototype web : en dessous de PPI_MIN la prise est marquée « sous la norme »
     PPI_AUTO_1080: 130,        // idem quand le navigateur ne fournit que de la vidéo 1080p (Safari, iPhone)
-    SHARP_REL: 0.6,            // netteté : au moins 60 % de la meilleure netteté vue pendant la prise
+    SHARP_REL: 0.6,            // netteté (indicative) : au moins 60 % de la meilleure netteté vue pendant la prise
+    BURST_FRAMES: 6,           // rafale au déclenchement : on garde la plus nette des 6 images
     PHOTO_MIN_PX: 4000,        // grand côté de la photo pour un terminal apte (≈ 12 Mpx)
     PHOTO_FACTOR_DEFAULT: 2,   // rapport photo / vidéo supposé si le navigateur ne l'annonce pas
     SEG_W: 360,                // résolution de travail du repérage des doigts (petit côté, px)
@@ -478,6 +479,41 @@ function fitCover(canvas, vw, vh){
 function chips(el, list){ el.innerHTML = list.map(([label,state])=>`<span class="chip ${state}">${label}</span>`).join(''); }
 function instr(el, title, text, mode=''){ el.className = 'instr' + (mode?' '+mode:''); el.innerHTML = `<h2>${title}</h2><p>${text}</p>`; }
 
+/* Caméra des doigts : on choisit l'objectif, puis on pousse la vidéo à la résolution maximale annoncée
+   (sur iPhone, Safari annonce 4032 × 3024 : la définition du capteur en 12 Mpx). ?objectif=tele|ultra|principal pour tester. */
+async function openFingerCamera(video, facing){
+  let deviceId = null;
+  if (facing === 'environment'){
+    const want = new URLSearchParams(location.search).get('objectif') || 'principal';
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && d.label);
+    const back = cams.filter(d => /back|arri[eè]re|rear/i.test(d.label));
+    const pick = want === 'tele' ? back.find(d => /t[ée]l[ée]|tele/i.test(d.label))
+               : want === 'ultra' ? back.find(d => /ultra/i.test(d.label))
+               : back.find(d => !/ultra|t[ée]l[ée]|tele|dual|double|triple/i.test(d.label));
+    if (pick) deviceId = pick.deviceId;
+    log(`objectifs arrière : ${back.map(d=>d.label).join(' · ') || 'non nommés'} — choisi : ${pick?.label || 'par défaut'}`);
+  }
+  const video_ = deviceId ? { deviceId:{ exact: deviceId }, width:{ ideal:4032 }, height:{ ideal:3024 } } : { facingMode: facing, width:{ ideal:4032 }, height:{ ideal:3024 } };
+  const stream = await navigator.mediaDevices.getUserMedia({ video: video_, audio:false });
+  S.streams.push(stream); video.srcObject = stream; await video.play();
+  await new Promise(r => video.readyState >= 2 ? r() : video.onloadeddata = r);
+  const tr = stream.getVideoTracks()[0], caps = tr.getCapabilities?.() || {};
+  const mw = caps.width?.max, mh = caps.height?.max;
+  if (mw && mh && Math.max(video.videoWidth, video.videoHeight) < Math.max(mw, mh)){
+    try { await tr.applyConstraints({ width:{ ideal: Math.max(mw,mh) }, height:{ ideal: Math.min(mw,mh) } }); await new Promise(r => setTimeout(r, 400)); } catch(e){ log('résolution maximale refusée : ' + e.name); }
+  }
+  log(`caméra des doigts : ${video.videoWidth}×${video.videoHeight} (maximum annoncé ${mw || '?'}×${mh || '?'}) — ${tr.label}`);
+  return stream;
+}
+// Netteté d'une zone de la vidéo, sans recopier toute l'image (utile en 12 Mpx)
+const sharpCv = document.createElement('canvas');
+function videoSharpness(video, bx){
+  const side = 160, k = Math.min(1, side/Math.max(bx.W, bx.L)); const w = Math.max(8, Math.round(bx.W*k)), h = Math.max(8, Math.round(bx.L*k));
+  sharpCv.width = w; sharpCv.height = h; const ctx = sharpCv.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(video, Math.max(0, bx.cx-bx.W/2), Math.max(0, bx.cy-bx.L/2), bx.W, bx.L, 0, 0, w, h);
+  const d = ctx.getImageData(0,0,w,h).data; const g = new Float32Array(w*h); for (let i=0,j=0;i<g.length;i++,j+=4) g[i] = d[j+1];
+  return laplacianVar({ g, W:w, H:h });
+}
 async function openCamera(video, facing, w, h){
   const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode: facing, width:{ideal:w}, height:{ideal:h} }, audio:false });
   S.streams.push(stream); video.srcObject = stream; await video.play();
@@ -808,7 +844,7 @@ function segmentFingers(src, sw, sh, expected){
     let sy=0,sx=0,syy=0,sxy=0; for (const [yy,x0,x1] of mid){ const cx=(x0+x1)/2; sy+=yy; sx+=cx; syy+=yy*yy; sxy+=cx*yy; }
     const m = mid.length, b = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a = (sx-b*sy)/m;
     const y0 = t.rows[0][0];
-    tracks.push({ tip:[(a+b*y0)/k, y0/k], b, w: w/k, len: n/k, area: n*w });
+    tracks.push({ tip:[(a+b*y0)/k, y0/k], b, w: w/k, len: n/k, area: n*w, cutTop: y0 <= 2 });
   }
   tracks.sort((p,q) => q.area - p.area);
   const fingers = tracks.slice(0, expected).sort((p,q) => p.tip[0] - q.tip[0]);
@@ -882,7 +918,7 @@ async function loadImage(blob){
   const c = newCanvas(bmp.width, bmp.height); c.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.(); return c;
 }
 // Photo pleine résolution par le navigateur (Chrome Android) ; sinon image de la vidéo
-async function captureStill(video, step, preview){
+async function captureStill(video, step, preview, fallback){
   const track = S.streams.at(-1)?.getVideoTracks()[0];
   let firstErr = null;
   if (window.ImageCapture && track && track.readyState === 'live'){
@@ -896,7 +932,7 @@ async function captureStill(video, step, preview){
       return await processImage(img, step, 'photo du navigateur');
     } catch(e){ firstErr = e; log('photo du navigateur : ' + (e.message || e.name)); }
   }
-  try { return await processImage(frameOf(video, true), step, 'image vidéo'); }
+  try { return await processImage(fallback || frameOf(video, true), step, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo'); }
   catch(e){ throw firstErr?.diag ? firstErr : e; }
 }
 
@@ -908,7 +944,7 @@ async function captureHand(step){
   $('b-handShot').hidden = true;
   const HC = CFG.HAND, N = HC.WINDOW;
   const W = { nombre:new Win(N), resolution:new Win(N), entiers:new Win(N), stable:new Win(N), net:new Win(N), all:new Win(N) };
-  let bestSharp = 0;
+  let bestSharp = 0, burst = null; const burstCanvas = null;
   let prevTips = null, manual = false, last = null, paused = false;
   const tStart = performance.now();
   return new Promise((resolve) => {
@@ -946,9 +982,13 @@ async function captureHand(step){
       // vidéo limitée à 1080p (cas de Safari sur iPhone) : seuil de démonstration abaissé, prise marquée « sous la norme »
       const ppiAuto = Math.min(vw, vh) >= 2000 || window.ImageCapture ? HC.PPI_AUTO : HC.PPI_AUTO_1080;
       let sharp = 0;
-      if (n){ const fr = frameOf(video); for (const f of seg.fingers){ const bx = phalanxBox(f); const g = grayRegion(fr, bx.cx - bx.W/2, bx.cy - bx.L/2, bx.W, bx.L, 160, 'green'); sharp += laplacianVar(g)/n; } bestSharp = Math.max(bestSharp, sharp); }
-      const c = { nombre: n === expected, resolution: !!ppiPhoto && ppiPhoto >= ppiAuto && ppiPhoto <= HC.PPI_MAX, entiers: !seg.topCut && !seg.sideCut, stable: moved < HC.MOVE_MAX, net: n > 0 && sharp >= bestSharp*HC.SHARP_REL && sharp > 2 };
-      c.all = c.nombre && c.resolution && c.entiers && c.stable && c.net;
+      if (n){ for (const f of seg.fingers) sharp += videoSharpness(video, phalanxBox(f))/n; bestSharp = Math.max(bestSharp, sharp); }
+      // doigts entiers : chaque cadre de phalange tient dans l'image (la paume, le pouce ou la table au bord n'y changent rien)
+      const inside = (f) => { if (f.cutTop) return false; const bx = phalanxBox(f), m = 0.01*Math.min(vw,vh), r = Math.hypot(bx.W, bx.L)/2;
+        return bx.cx - r > -m*0 + m && bx.cx + r < vw - m && bx.cy - r > m && bx.cy + r < vh - m; };
+      const c = { nombre: n === expected, resolution: !!ppiPhoto && ppiPhoto >= ppiAuto && ppiPhoto <= HC.PPI_MAX, entiers: n > 0 && seg.fingers.every(inside), stable: moved < HC.MOVE_MAX, net: n > 0 && sharp >= bestSharp*HC.SHARP_REL };
+      // la netteté est indicative : à la capture, on retient l'image la plus nette d'une courte rafale
+      c.all = c.nombre && c.resolution && c.entiers && c.stable;
       for (const key of Object.keys(W)) W[key].push(c[key]);
       if (n === expected) last = { fingers: seg.fingers };
       const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
@@ -956,26 +996,29 @@ async function captureHand(step){
       $('handMetrics').innerHTML = `papier <b>${seg.paper}</b> seuil peau <b>${seg.thr}</b> peau <b>${Math.round(seg.skinShare*100)} %</b> bandes <b>${seg.found}</b> `
         + (ppiNow ? `aperçu <b>${Math.round(ppiNow)} ppi</b> × ${photoFactor.toFixed(1)} ` : '') + `vidéo <b>${vw}×${vh}</b>`;
 
-      if (seg.sideCut || (seg.topCut && n < expected)) adv.set('Reculez un peu', 'Les doigts sortent de l\'écran : ils doivent y tenir entièrement.');
-      else if (!W.nombre.ok(0.5)){
+      if (!W.nombre.ok(0.5)){
         if (n === 0 && seg.skinShare > 0.12) adv.set('Écartez légèrement les doigts', 'Les doigts collés forment une seule masse : un petit espace entre chaque doigt suffit.');
         else if (n === 0) adv.set(...stepIntro(step));
         else if (n < expected) adv.set('Écartez légèrement les doigts', `${n} doigt(s) repéré(s) sur ${expected}. Les doigts doivent être entièrement sur la feuille blanche.`);
         else adv.set(step.kind === 'pouce' ? 'Repliez les autres doigts' : 'Seulement quatre doigts', 'Gardez dans le cadre uniquement les doigts demandés.');
       }
-      else if (!W.entiers.ok(0.5)) adv.set('Reculez un peu', 'Le bout des doigts touche le bord de l\'écran.');
-      else if (!W.net.ok(0.5) && W.resolution.ok(0.5)) adv.set('Reculez légèrement', 'L\'image est floue : le téléphone est plus près que sa distance de mise au point.');
+      else if (!W.entiers.ok(0.5)) adv.set('Reculez un peu', 'Le bout d\'un doigt sort de l\'écran.');
       else if (!W.resolution.ok(0.5)) ppiPhoto > HC.PPI_MAX ? adv.set('Éloignez un peu le téléphone', 'Trop près : la mise au point devient impossible.') : adv.set('Rapprochez le téléphone', 'Les doigts doivent remplir l\'écran ; la paume peut en sortir.');
       else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Main posée, téléphone immobile.');
       else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
       drawSegOverlay(ov, video, seg, W.all.ok(HC.AUTO_RATIO));
 
-      if ((W.all.ok(HC.AUTO_RATIO) && n === expected) || manual){
-        const mode = manual && !W.all.ok(HC.AUTO_RATIO) ? 'manuelle' : 'automatique';
-        adv.force('Capture en cours…', 'Ne bougez pas, la photo est prise en pleine résolution.', 'good');
-        $('b-handShot').hidden = true;
-        try { const r = await captureStill(video, step, n === expected ? seg : last); r.mode = mode; return resolve(r); }
-        catch(e){ manual = false; W.all.reset(); fail(e); }
+      if (burst){
+        if (n === expected && sharp > burst.sharp){ burst.sharp = sharp; burst.seg = seg; if (!burst.canvas) burst.canvas = newCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); }
+        if (++burst.count >= HC.BURST_FRAMES){
+          const b = burst; burst = null;
+          log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté retenue ${b.sharp.toFixed(0)}`);
+          try { const r = await captureStill(video, step, b.seg || last, b.canvas); r.mode = 'automatique'; return resolve(r); }
+          catch(e){ W.all.reset(); fail(e); }
+        }
+      } else if (W.all.ok(HC.AUTO_RATIO) && n === expected){
+        adv.force('Capture en cours…', 'Ne bougez pas.', 'good');
+        burst = { count: 0, sharp: -1, seg: null, canvas: burstCanvas };
       }
       requestAnimationFrame(loop);
     };
@@ -986,7 +1029,7 @@ async function runFingers(){
   show('s-doigts');
   const video = $('vHand');
   const facing = S.env.rear?.present ? 'environment' : 'user';
-  try { await openCamera(video, facing, 3840, 2160); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
+  try { await openFingerCamera(video, facing); } catch(e){ instr($('handInstr'),'Caméra indisponible', e.name,'alert'); return false; }
   $('handLoading').hidden = true;
   const stream = S.streams.at(-1);
   const tcap = stream.getVideoTracks()[0].getCapabilities?.() || {};
@@ -996,7 +1039,7 @@ async function runFingers(){
   for (const step of STEPS){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
-      if (S.streams.at(-1)?.getVideoTracks()[0]?.readyState !== 'live'){ stopStreams(); try { await openCamera(video, facing, 3840, 2160); } catch(e){ log('caméra non rouverte : ' + e.name); } }
+      if (S.streams.at(-1)?.getVideoTracks()[0]?.readyState !== 'live'){ stopStreams(); try { await openFingerCamera(video, facing); } catch(e){ log('caméra non rouverte : ' + e.name); } }
       const r = await captureHand(step);
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = r.error; stopStreams(); return false; }
@@ -1241,8 +1284,8 @@ $('b-send').onclick = async () => {
 $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
-if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v10 · 2 octobre 2026';
+if (location.hash === '#debug') window.__proto = { S, CFG, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+const VERSION = 'v12 · 2 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
