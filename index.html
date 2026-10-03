@@ -513,9 +513,12 @@ async function openFingerCamera(video, facing){
   }
   // 3840 × 2160 d'abord : c'est la demande que Safari et Chrome sur iPhone honorent (2160 × 3840 obtenu à l'essai)
   const video_ = deviceId ? { deviceId:{ exact: deviceId }, width:{ ideal:3840 }, height:{ ideal:2160 } } : { facingMode: facing, width:{ ideal:3840 }, height:{ ideal:2160 } };
-  const stream = await navigator.mediaDevices.getUserMedia({ video: video_, audio:false });
-  S.streams.push(stream); video.srcObject = stream; await video.play();
-  await new Promise(r => video.readyState >= 2 ? r() : video.onloadeddata = r);
+  const stream = await withTimeout(navigator.mediaDevices.getUserMedia({ video: video_, audio:false }), 8000, 'caméra : pas de réponse');
+  S.streams.push(stream); video.srcObject = stream;
+  // délais bornés : sur iPhone, un flux rouvert juste après une photo peut ne jamais livrer d'image
+  await withTimeout(video.play(), 4000, 'lecture de la vidéo bloquée').catch(e => log(e.message));
+  await withTimeout(new Promise(r => video.readyState >= 2 ? r() : video.onloadeddata = r), 4000, 'aucune image reçue de la caméra');
+  if (!video.videoWidth) throw new Error('aperçu vide');
   const tr = stream.getVideoTracks()[0], caps = tr.getCapabilities?.() || {};
   const mw = caps.width?.max, mh = caps.height?.max;
   // montée en résolution seulement si elle n'aboutit pas à une image plus petite (l'essai du 2 octobre a montré un recul en 1080p)
@@ -1164,7 +1167,9 @@ function fromCanon(xc, yc, vw, vh, dir){ return dir > 0 ? [yc, vh - xc] : [vw - 
 function frameKeys(step){ if (step.kind === 'pouce') return [THUMB]; return canonDir(step) > 0 ? [FINGERS[3], FINGERS[2], FINGERS[1], FINGERS[0]] : [...FINGERS]; }
 function currentPhotoFactor(vw, vh){
   const HC = CFG.HAND, vLong = Math.max(vw, vh);
-  return !window.ImageCapture ? 1 : S.env.photoRatio ? Math.max(1, S.env.photoRatio) : S.env.rear?.photoMax ? Math.max(1, S.env.rear.photoMax / vLong) : HC.PHOTO_FACTOR_DEFAULT;
+  if (!window.ImageCapture) return 1;
+  const f = S.env.photoRatio || (S.env.rear?.photoMax ? S.env.rear.photoMax / vLong : HC.PHOTO_FACTOR_DEFAULT);
+  return f < 1.3 ? 1 : f;     // photo sans gain réel : elle n'est pas prise (voir takeScreenPhoto)
 }
 // Gabarit en pixels de la vue redressée de la vidéo (largeur vh, hauteur vw)
 // view : partie de la vidéo réellement visible et libre à l'écran (coordonnées vidéo) ; par défaut toute l'image
@@ -1322,7 +1327,8 @@ async function takeScreenPhoto(video){
   const track = S.streams.at(-1)?.getVideoTracks()[0];
   if (!(window.ImageCapture && track && track.readyState === 'live')) return null;
   // photo déjà mesurée à la taille de la vidéo : elle n'apporte rien et interrompt l'aperçu sur iPhone → image de la rafale
-  if (S.env.photoRatio && S.env.photoRatio < 1.05){ if (!S.env.photoSkipLogged){ log('photo du navigateur pas plus définie que la vidéo : prises suivantes sur la rafale vidéo'); S.env.photoSkipLogged = true; } return null; }
+  const expected = S.env.photoRatio || ((S.env.rear?.photoMax || 0) / Math.max(video.videoWidth, video.videoHeight)) || 2;
+  if (expected < 1.3){ if (!S.env.photoSkipLogged){ log(`photo du navigateur peu plus définie que la vidéo (× ${expected.toFixed(2)}) : prises sur la rafale vidéo, sans interrompre l'aperçu`); S.env.photoSkipLogged = true; } return null; }
   const vw = video.videoWidth, vh = video.videoHeight;
   const ic = new ImageCapture(track); let ps = {};
   try { const pc = await ic.getPhotoCapabilities(); if (pc.imageWidth?.max && pc.imageHeight?.max) ps = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max }; } catch {}
@@ -1488,12 +1494,19 @@ function cameraHealthy(video){
   const tr = S.streams.at(-1)?.getVideoTracks()[0];
   return !!(tr && tr.readyState === 'live' && !tr.muted && video.videoWidth > 0 && video.readyState >= 2);
 }
+function withTimeout(p, ms, msg){ let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(msg)), ms); })]).finally(() => clearTimeout(t)); }
 async function reviveFingerCamera(why){
   if (!fingerCam || S.abort) return false;
   const { video, facing } = fingerCam; const torch = torchOn;
   log(`caméra des doigts rouverte — ${why}`);
-  stopStreams();
-  try { await openFingerCamera(video, facing); } catch(e){ log('réouverture impossible : ' + e.name); return false; }
+  // deux essais : flux arrêté, élément vidéo vidé, court délai pour que le système libère la caméra
+  let opened = false;
+  for (let k = 0; k < 2 && !opened && !S.abort; k++){
+    stopStreams(); video.pause?.(); video.srcObject = null;
+    await new Promise(r => setTimeout(r, 400 + 600*k));
+    try { await openFingerCamera(video, facing); opened = true; } catch(e){ log(`réouverture impossible (essai ${k+1}) : ${e.message || e.name}`); }
+  }
+  if (!opened) return false;
   if (S.abort){ stopStreams(); return false; }
   if (torch) await setTorch(S.streams.at(-1), true);
   return cameraHealthy(video);
@@ -1513,7 +1526,7 @@ async function runFingers(){
     const need = CFG.HAND.MIN_GOOD[step.kind], n = step.fingers.length;
     while (true){
       if (S.abort){ stopStreams(); return false; }
-      if (!cameraHealthy(video)) await reviveFingerCamera('aperçu interrompu avant la prise');
+      if (!cameraHealthy(video)){ instr($('handInstr'), 'Réouverture de la caméra…', 'L\'aperçu s\'est interrompu après la photo. Gardez la main en place.', 'alert'); await reviveFingerCamera('aperçu interrompu avant la prise'); }
       const r = LAYOUT === 'cadre' ? await captureHandFrame(step) : await captureHand(step);
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = r.error; stopStreams(); return false; }
@@ -1836,7 +1849,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, frameLayout, measureFrame, canonSample, scaleLayout, processFrame, captureStillFrame, captureHandFrame, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v19 · 3 octobre 2026';
+const VERSION = 'v20 · 3 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>

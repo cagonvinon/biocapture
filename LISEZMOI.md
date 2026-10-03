@@ -45,7 +45,7 @@ Le cadrage est tolérant : un doigt un peu décalé ou un bout de doigt légère
 car la découpe suit le doigt mesuré et non le cadre. Si les doigts restent trop petits dans leur cadre pendant
 7 secondes (téléphone qui ne peut pas s'approcher davantage), le cadre se réduit de 10 %.
 
-Sur iPhone, quand la photo du navigateur n'est pas plus définie que la vidéo, le prototype ne la prend plus
+Quand la photo du navigateur n'est pas nettement plus définie que la vidéo (moins de 1,3 fois), le prototype ne la prend pas
 et utilise l'image la plus nette de la rafale : l'aperçu n'est plus interrompu.
 
 L'ancienne disposition (main à plat sur une feuille blanche, doigts vers le haut) reste accessible en ajoutant
