@@ -271,7 +271,7 @@ const CFG = {
     COHERENCE_MIN: 0.45,       // cohérence d'orientation minimale : écarte le bruit du fond et les zones floues
     MIN_AREA_MM2: 60,          // surface de crêtes lisibles minimale (mm²) pour un doigt exploitable
     // disposition latérale, zone fixe
-    ZONE: { longueur: 0.86, pouce: 0.40, profondeur: 0.50, marge: 0.07, bout_max: 0.62 }, // proportions de la partie visible ; bout_max : profondeur maximale du bout des doigts dans la zone
+    ZONE: { cadres: 0.62, longueur: 0.86, pouce: 0.40, profondeur: 0.50, marge: 0.07, bout_max: 0.62 }, // proportions de la partie visible ; bout_max : profondeur maximale du bout des doigts dans la zone
     CONTRAST_MIN: 40,          // écart de couleur minimal peau / fond (RVB)
     RIDGE_COH: 0.45,           // cohérence d'orientation à partir de laquelle les crêtes sont jugées visibles
     RIDGE_MM: 0.46,            // écartement moyen des crêtes chez l'adulte (mm), pour l'échelle
@@ -1184,7 +1184,7 @@ function zoneFor(step, vw, vh, view){
     // quelle que soit la définition de la vidéo ; la même échelle sert aux pouces
     const keys = frameKeys(step), gap = 4, widths = keys.map(k => FINGER_WIDTH_MM[k.key]);
     const total = widths.reduce((a,b)=>a+b,0) + gap*(keys.length-1);
-    const pxmm = Math.min(0.80*(xb - xa)/73.5, 0.80*(yb - ya)/(16 + 1.9*16.5 + 8));
+    const pxmm = Math.min(CFG.HAND.ZONE.cadres*(xb - xa)/73.5, 0.80*(yb - ya)/(16 + 1.9*16.5 + 8));
     const tip0 = ya + (yb - ya)*0.14;
     let x = (xa + xb)/2 - total*pxmm/2;
     const boxes = keys.map((k, i) => { const w = widths[i]*pxmm, cx = x + w/2; x += w + gap*pxmm; return { finger: k, cx, tipY: tip0 + TIP_STAGGER_MM[k.key]*pxmm, w, L: 1.6*w }; });
@@ -1197,7 +1197,7 @@ function zoneFor(step, vw, vh, view){
   const cx = (xa + xb)/2, y0 = ya + (yb - ya)*CFG.HAND.ZONE.marge;
   return { dir, x0: cx - len/2, x1: cx + len/2, y0, y1: y0 + dep, Wc: vh, Hc: vw };
 }
-function scaleZone(Z, k){ return { ...Z, x0: Z.x0*k, x1: Z.x1*k, y0: Z.y0*k, y1: Z.y1*k, Wc: Z.Wc*k, Hc: Z.Hc*k, boxes: Z.boxes?.map(b => ({ ...b, cx: b.cx*k, tipY: b.tipY*k, w: b.w*k, L: b.L*k })) }; }
+function scaleZone(Z, k){ return { ...Z, pxmm: Z.pxmm ? Z.pxmm*k : Z.pxmm, x0: Z.x0*k, x1: Z.x1*k, y0: Z.y0*k, y1: Z.y1*k, Wc: Z.Wc*k, Hc: Z.Hc*k, boxes: Z.boxes?.map(b => ({ ...b, cx: b.cx*k, tipY: b.tipY*k, w: b.w*k, L: b.L*k })) }; }
 const anaCv = document.createElement('canvas');
 function canonSample(src, sw, sh, dir, scale){
   const W = Math.max(8, Math.round(sh*scale)), H = Math.max(8, Math.round(sw*scale));
@@ -1552,6 +1552,237 @@ async function captureHandFrame(step){
   });
 }
 
+/* ---------------------------------------------------------------------
+   Gabarit « cadres » (v23) : le cadre fait foi
+   Les essais de la v22 ont montré qu'une détection libre des doigts (compter les
+   doigts, suivre leurs bouts) fluctue d'une image à l'autre : 4, puis 3, puis 2
+   doigts, et des consignes contradictoires. Ici, on ne cherche plus les doigts :
+   on vérifie seulement, cadre par cadre, deux choses simples et stables :
+   1. le cadre est occupé par de la peau (comparée au fond situé devant le cadre) ;
+   2. les crêtes y sont nettes (cohérence d'orientation à la définition native).
+   Pas de consigne « rapprochez / reculez » fondée sur une taille de doigt
+   supposée : une seule consigne de distance, « jusqu'à ce que les cadres passent
+   au vert ». L'échelle est mesurée après coup, par l'écartement des crêtes.
+   --------------------------------------------------------------------- */
+// Mesures d'un cadre dans l'échantillon (coordonnées de la vue redressée, à l'échelle de l'échantillon)
+function boxColors(A, B){
+  const { d, W, H } = A;
+  const meanRect = (x0, y0, x1, y1) => { let r=0,g=0,b=0,n=0; const st = Math.max(1, Math.round(Math.min(x1-x0, y1-y0)/10));
+    for (let y=Math.max(0,y0|0); y<Math.min(H,y1); y+=st) for (let x=Math.max(0,x0|0); x<Math.min(W,x1); x+=st){ const i = (y*W+x)*4; r+=d[i]; g+=d[i+1]; b+=d[i+2]; n++; }
+    return n ? [r/n, g/n, b/n] : null; };
+  return B.map(b => ({
+    core: meanRect(b.cx - 0.22*b.w, b.tipY + 0.3*b.L, b.cx + 0.22*b.w, b.tipY + 0.85*b.L),
+    front: meanRect(b.cx - 0.3*b.w, b.tipY - 0.45*b.L, b.cx + 0.3*b.w, b.tipY - 0.1*b.L),
+  }));
+}
+const dist3 = (p, q) => p && q ? Math.hypot(p[0]-q[0], p[1]-q[1], p[2]-q[2]) : 0;
+const med3 = (arr) => { const a = arr.filter(Boolean); return a.length ? [0,1,2].map(k => median(a.map(c => c[k]))) : null; };
+// Occupation de chaque cadre : couleur du cœur proche de la peau de référence, loin du fond
+function boxOccupancy(cols){
+  const skin = med3(cols.map(c => c.core)), bg = med3(cols.map(c => c.front));
+  const contrast = dist3(skin, bg);
+  const occ = cols.map(c => contrast >= CFG.HAND.CONTRAST_MIN && dist3(c.core, bg) > 0.55*contrast && dist3(c.core, skin) < 0.6*contrast);
+  const over = cols.map(c => contrast >= CFG.HAND.CONTRAST_MIN && dist3(c.front, skin) < 0.45*contrast);   // peau devant le cadre : le doigt dépasse
+  return { skin, bg, contrast, occ, over };
+}
+// Repérage fin du doigt dans un cadre (à la capture seulement) : bout, largeur, axe ; null si incertain
+function measureInBox(A, b, skin, bg){
+  const { d, W, H } = A;
+  const isSkin = (x, y) => { const i = (y*W + x)*4; const p = [d[i], d[i+1], d[i+2]]; return dist3(p, skin) < dist3(p, bg); };
+  const xa = Math.max(0, Math.round(b.cx - 0.85*b.w)), xb = Math.min(W-1, Math.round(b.cx + 0.85*b.w));
+  const ya = Math.max(0, Math.round(b.tipY - 0.5*b.L)), yb = Math.min(H-1, Math.round(b.tipY + 1.2*b.L));
+  const rows = [];
+  for (let y=ya; y<=yb; y++){ let best = null, x = xa;
+    while (x <= xb){ if (!isSkin(x,y)){ x++; continue; } const r0 = x; while (x <= xb && isSkin(x,y)) x++; const r1 = x-1;
+      if (r1 >= b.cx - 0.3*b.w && r0 <= b.cx + 0.3*b.w && (!best || r1-r0 > best[1]-best[0])) best = [r0, r1]; }
+    rows.push(best); }
+  let tip = null;
+  for (let i=0; i+2<rows.length; i++) if ([0,1,2].every(k => rows[i+k] && rows[i+k][1]-rows[i+k][0]+1 >= 0.3*b.w)){ tip = ya + i; break; }
+  if (tip === null) return null;
+  const use = []; for (let y = Math.round(tip + 0.4*b.L); y <= Math.min(yb, Math.round(tip + 1.0*b.L)); y++){ const r = rows[y-ya]; if (r && r[0] > xa+1 && r[1] < xb-1) use.push([y, r]); }
+  if (use.length < 4) return null;
+  const w = median(use.map(([,r]) => r[1]-r[0]+1));
+  if (w < 0.35*b.w || w > 1.45*b.w) return null;
+  let sy=0,sx=0,syy=0,sxy=0; for (const [y,r] of use){ const c=(r[0]+r[1])/2; sy+=y; sx+=c; syy+=y*y; sxy+=c*y; }
+  const m = use.length, slope = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a0 = (sx-slope*sy)/m;
+  return { tip: [a0 + slope*tip, tip], b: Math.max(-0.4, Math.min(0.4, slope)), w };
+}
+// Traitement de l'image retenue : échelle par les crêtes, découpe à 500 ppi de chaque cadre occupé
+async function processBoxes(img, step, Z, source, occ){
+  const dir = Z.dir, need = minFingers(step);
+  const canon = rotate90(img, dir);
+  const s = Math.min(1, CFG.HAND.SEG_W*1.4 / Math.min(canon.width, canon.height));
+  const A = canonSample(img, img.width, img.height, dir, s), Bs = scaleZone(Z, s).boxes;
+  const oc = boxOccupancy(boxColors(A, Bs));
+  const take = Z.boxes.map((b, i) => (occ?.[i] ?? oc.occ[i]));
+  // repérage fin quand il est sûr ; sinon le doigt est supposé centré dans son cadre
+  const fs = [];
+  Z.boxes.forEach((b, i) => { if (!take[i]) return;
+    const m = oc.contrast >= CFG.HAND.CONTRAST_MIN ? measureInBox(A, Bs[i], oc.skin, oc.bg) : null;
+    fs.push({ key: b.finger, box: b, measured: !!m, sf: m ? { tip: [m.tip[0]/s, m.tip[1]/s], b: m.b, w: m.w/s } : { tip: [b.cx, b.tipY], b: 0, w: b.w/1.15 } }); });
+  if (fs.length < need){
+    const e = new Error(`${fs.length} cadre(s) occupé(s) sur ${Z.boxes.length} (${source}, contraste peau/fond ${Math.round(oc.contrast)})`);
+    const diag = newCanvas(Math.min(480, canon.width), canon.height*Math.min(480, canon.width)/canon.width); const dx = diag.getContext('2d'); dx.drawImage(canon, 0, 0, diag.width, diag.height);
+    const r = diag.width/canon.width; dx.lineWidth = 2; dx.strokeStyle = '#f2c14b'; for (const b of Z.boxes) dx.strokeRect((b.cx-b.w*0.575)*r, b.tipY*r, b.w*1.15*r, b.L*r);
+    e.diag = diag; release(canon); throw e;
+  }
+  // échelle 1 : écartement des crêtes mesuré à la définition native (indépendant de la taille des doigts)
+  const ppis = [];
+  for (const f of fs){ const c = cropSeg(canon, f.sf, 500); const gr = toGray(c); const rp = ridgePeriod(gr); if (rp) ppis.push(rp.period * 25.4 / CFG.HAND.RIDGE_MM); release(c, gr); }
+  // (cropSeg à « 500 ppi » sans mise à l'échelle : la période est lue en pixels natifs)
+  const ppiR = ppis.length >= Math.min(2, fs.length) ? median(ppis) : null;
+  // échelle 2 : largeur des doigts repérés finement (valeurs moyennes de l'adulte)
+  const keysW = fs.filter(f => f.measured).map(f => f.sf.w / (FINGER_WIDTH_MM[f.key.key]/25.4));
+  const ppiW = keysW.length ? median(keysW) : null;
+  let ppi, scale;
+  if (ppiR && ppiW && ppiR/ppiW > 0.7 && ppiR/ppiW < 1.45){ ppi = Math.exp(0.6*Math.log(ppiR) + 0.4*Math.log(ppiW)); scale = 'écartement des crêtes et largeur des doigts'; }
+  // désaccord franc : à basse résolution, l'écartement des crêtes peut être lu au double (crêtes à peine résolues) → largeur
+  else if (ppiR && ppiW){ ppi = ppiW; scale = 'largeur des doigts (crêtes en désaccord, écartées)'; }
+  else if (ppiR){ ppi = ppiR; scale = 'écartement des crêtes'; }
+  else if (ppiW){ ppi = ppiW; scale = 'largeur des doigts'; }
+  else { ppi = Z.pxmm * 25.4; scale = 'taille du cadre (estimation grossière)'; }
+  const missing = Z.boxes.filter((b, i) => !take[i]).map(b => b.finger.fr);
+  const fingers = fs.map(({ key, sf }) => {
+    const crop = cropSeg(canon, sf, ppi);
+    const gray = toGray(crop), q = fingerQuality(crop), ext = extractMinutiae(gray);
+    q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.coherence = ext.coherence;
+    q.exploitable = q.glare < 0.12 && ext.count >= CFG.HAND.MIN_MINUTIAE && ext.area_mm2 >= CFG.HAND.MIN_AREA_MM2;
+    const enhanced = ridgeEnhance(crop); release(crop);
+    return { finger: key, code: key.code[step.side], crop: gray, enhanced, q, ext };
+  }).sort((p,q) => step.fingers.indexOf(p.finger) - step.fingers.indexOf(q.finger));
+  const overview = makeDiag(canon, { fingers: fs.map(f => f.sf) });
+  release(canon);
+  const good = fingers.filter(x => x.q.exploitable).length;
+  const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push(`sous la norme (${Math.round(ppi)} ppi < ${CFG.HAND.PPI_MIN})`); if (missing.length) flags.push(`cadre vide : ${missing.join(', ')}`);
+  log(`${step.label.toLowerCase()} : ${source} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (${scale}${ppiR ? `, crêtes ${Math.round(ppiR)}` : ''}${ppiW ? `, largeur ${Math.round(ppiW)}` : ''}), ${good}/${fingers.length} exploitable(s), minuties ${fingers.map(x=>x.q.minuties).join('/')}${flags.length ? ' — ' + flags.join(', ') : ''}`);
+  return { fingers, overview, ppi, ppi_cretes: ppiR ? Math.round(ppiR) : null, ppi_largeur: ppiW ? Math.round(ppiW) : null, scale, source, flags, good, frameSize: [img.width, img.height], disposition: 'latérale, cadres fixes' };
+}
+async function captureStillBoxes(video, step, Z, occ, fallback){
+  let firstErr = null, ph = null;
+  try {
+    ph = await takeScreenPhoto(video);
+    if (ph){ const r = await processBoxes(ph.img, step, scaleZone(Z, ph.k), 'photo du navigateur', occ); release(fallback); return r; }
+  } catch(e){ firstErr = e; log('photo du navigateur : ' + (e.message || e.name)); if (!e.diag){ S.env.photoRatio = 1; } }
+  finally { if (ph) release(ph.img); }
+  const img = fallback || frameOf(video, true);
+  try { return await processBoxes(img, step, Z, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', occ); }
+  catch(e){ throw firstErr?.diag ? firstErr : e; }
+  finally { release(img); }
+}
+async function captureHandBoxes(step){
+  const video = $('vHand'), ov = $('oHand'), adv = makeAdvisor($('handInstr'));
+  const need = minFingers(step), HC = CFG.HAND, N = HC.WINDOW;
+  const done = STEPS.filter(st => S.hands[st.id]).length;
+  const intro = () => frameIntro(step);
+  adv.force(...intro()); $('b-handShot').hidden = true;
+  let boxWin = null;                                   // fenêtre glissante par cadre : occupé, crêtes nettes
+  const W = { all: new Win(N) };
+  let burst = null, fps = 0, lastT = 0, paused = false, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0, nFrames = 0;
+  let frameCount = 0; const gen = S.handGen = (S.handGen || 0) + 1;
+  const onFrame = () => { frameCount++; if (S.handGen === gen && !S.abort) video.requestVideoFrameCallback(onFrame); };
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
+  return new Promise((resolve) => {
+    let skip = null;
+    $('b-skipHand').onclick = () => {
+      const el = $('handInstr'); el.className = 'instr alert';
+      el.innerHTML = `<h2>Déclarer une exception · ${step.label}</h2><p>Comme à l'enrôlement, l'absence d'une empreinte est consignée avec son motif.</p><div class="row" style="margin-top:8px"><button class="btn small" id="x-amp" style="width:auto">Amputation</button><button class="btn small" id="x-bles" style="width:auto">Blessure ou pansement</button><button class="btn ghost small" id="x-ann" style="width:auto;color:#fff;border-color:#fff">Annuler</button></div>`;
+      $('x-amp').onclick = () => { skip = 'amputation'; }; $('x-bles').onclick = () => { skip = 'blessure ou pansement'; }; $('x-ann').onclick = () => { paused = false; adv.force(...intro()); };
+      paused = true;
+    };
+    const fail = (e) => {
+      log(`${step.label.toLowerCase()} : capture impossible — ${e.message}`); (S.handStatus ||= {})[step.id] = 'dernière capture impossible : ' + e.message;
+      paused = true; $('diagTitle').textContent = 'Les cadres n\'étaient pas occupés sur l\'image retenue'; $('diagText').textContent = e.message;
+      $('diagImg').innerHTML = ''; if (e.diag){ const c = document.createElement('canvas'); c.width = e.diag.width; c.height = e.diag.height; c.getContext('2d').drawImage(e.diag,0,0); $('diagImg').appendChild(c); }
+      $('handDiag').hidden = false; $('diagCount').textContent = 'Nouvelle tentative automatique dans 4 secondes.';
+      setTimeout(() => { $('handDiag').hidden = true; paused = false; adv.force(...intro()); }, 4000);
+    };
+    const loop = async () => {
+      if (S.abort || !S.streams.length) return resolve(null);
+      if (skip) return resolve({ exception: skip });
+      if (paused){ requestAnimationFrame(loop); return; }
+      const vt = video.requestVideoFrameCallback ? frameCount : video.currentTime, nowW = performance.now();
+      if (vt !== lastVT){ lastVT = vt; frozenSince = nowW; }
+      if (!(cameraHealthy(video) && nowW - frozenSince < 2500)){
+        stallSince ||= nowW;
+        if (nowW - stallSince > 1200){
+          adv.force('Réouverture de la caméra…', 'L\'aperçu s\'est interrompu. Gardez la main en place.', 'alert');
+          video.play().catch(()=>{});
+          const ok = await reviveFingerCamera(cameraHealthy(video) ? 'aperçu figé' : `aperçu vide (vidéo ${video.videoWidth}×${video.videoHeight})`);
+          if (S.abort) return resolve(null);
+          if (!ok && ++revives >= 3) return resolve({ error: 'caméra arrière interrompue et non rouverte' });
+          stallSince = 0; frozenSince = performance.now(); W.all.reset(); burst = null; adv.force(...intro());
+        }
+        requestAnimationFrame(loop); return;
+      }
+      stallSince = 0;
+      if (sessionLeft() === 0) return resolve({ error:'session expirée' });
+      const vw = video.videoWidth, vh = video.videoHeight;
+      nFrames++;
+      if (!S.env.zoneView || S.env.zoneView.vw !== vw || S.env.zoneView.vh !== vh){
+        if (nFrames < 4){ requestAnimationFrame(loop); return; }
+        const vr = ov.getBoundingClientRect(); const sc = Math.max(vr.width/vw, vr.height/vh), ox = (vr.width - vw*sc)/2, oy = (vr.height - vh*sc)/2;
+        S.env.zoneView = { vw, vh, x0: Math.max(0, -ox/sc), x1: Math.min(vw, (vr.width - ox)/sc), y0: Math.max(0, (vr.height*0.24 - oy)/sc), y1: Math.min(vh, (vr.height*0.97 - oy)/sc) };
+      }
+      const Z = zoneFor(step, vw, vh, S.env.zoneView);
+      const s = HC.SEG_W / Math.min(vw, vh);
+      const A = canonSample(video, vw, vh, Z.dir, s);
+      const oc = boxOccupancy(boxColors(A, scaleZone(Z, s).boxes));
+      // crêtes nettes : plage au milieu de chaque cadre occupé, à la définition native
+      const coh = Z.boxes.map((b, i) => { if (!oc.occ[i]) return 0; const [px, py] = fromCanon(b.cx, b.tipY + 0.55*b.L, vw, vh, Z.dir); return patchCoherence(video, px, py, 0.5*b.w); });
+      boxWin ||= Z.boxes.map(() => ({ occ: new Win(6), rid: new Win(6), over: new Win(6) }));
+      Z.boxes.forEach((b, i) => { boxWin[i].occ.push(oc.occ[i]); boxWin[i].rid.push(oc.occ[i] && coh[i] >= HC.RIDGE_COH); boxWin[i].over.push(oc.over[i]); });
+      // états lissés : un cadre ne change d'état que si la majorité des 6 dernières images le confirme
+      const st = boxWin.map(w => ({ occ: w.occ.ok(0.5), rid: w.rid.ok(0.5), over: w.over.ok(0.6) }));
+      const nOcc = st.filter(x => x.occ).length, nRid = st.filter(x => x.rid).length, nOver = st.filter(x => x.over).length;
+      const ready = nRid >= need && nOver < Math.max(1, Math.ceil(Z.boxes.length/2));
+      W.all.push(ready);
+      chips($('handChips'), [[`cadres occupés ${nOcc}/${Z.boxes.length}`, nOcc >= need ? 'ok' : nOcc ? 'warn' : 'ko'], [`crêtes nettes ${nRid}/${Z.boxes.length}`, nRid >= need ? 'ok' : 'warn'], ['fond contrasté', oc.contrast >= HC.CONTRAST_MIN ? 'ok' : 'warn']]);
+      const now = performance.now(); fps = fps ? fps*0.8 + 0.2*(1000/Math.max(1, now - lastT)) : 0; lastT = now;
+      $('handMetrics').innerHTML = `${fps ? `<b>${fps.toFixed(0)}</b> img/s ` : ''}contraste <b>${Math.round(oc.contrast)}</b> netteté <b>${coh.map(c => c.toFixed(2)).join(' ')}</b> vidéo <b>${vw}×${vh}</b>`;
+      $('handStep').textContent = `visage ${S.face.reference ? '✓' : '✗'} · prises ${done}/4 · ${step.label.toLowerCase()} · essai ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
+      // trois consignes seulement, sans aller-retour « rapprochez / reculez »
+      if (nOcc < need) adv.set(...intro());
+      else if (nOver >= Math.max(1, Math.ceil(Z.boxes.length/2))) adv.set('Reculez un peu la main', 'Le bout des doigts doit s\'arrêter dans les cadres.');
+      else if (nRid < need) adv.set('Ajustez doucement la distance', 'Avancez ou reculez lentement le téléphone jusqu\'à ce que les cadres passent au vert. Allumez la torche si la pièce est sombre.');
+      else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
+      drawBoxesOverlay(ov, video, Z, st, W.all.ok(HC.AUTO_RATIO));
+
+      if (burst){
+        if (ready){ const sc = coh.reduce((a,b) => a+b, 0); if (sc > burst.score){ burst.score = sc; burst.occ = st.map(x => x.occ); if (!burst.canvas) burst.canvas = tmpCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); } }
+        if (++burst.count >= HC.BURST_FRAMES){
+          const b = burst; burst = null;
+          if (!b.canvas){ W.all.reset(); requestAnimationFrame(loop); return; }
+          log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté retenue ${(b.score/Z.boxes.length).toFixed(2)}`);
+          try { const r = await captureStillBoxes(video, step, Z, b.occ, b.canvas); r.mode = 'automatique'; return resolve(r); }
+          catch(e){ W.all.reset(); fail(e); }
+        }
+      } else if (W.all.ok(HC.AUTO_RATIO)){
+        adv.force('Capture en cours…', 'Ne bougez pas.', 'good');
+        burst = { count: 0, score: -1, occ: null, canvas: null };
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+}
+// Dessin : silhouette de la main et cadres (blanc : vide ; jaune : occupé ; vert : crêtes nettes)
+function drawBoxesOverlay(canvas, video, Z, st, good){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const { ctx, s, ox, oy, cw, ch } = fitCover(canvas, vw, vh);
+  const toCanon = () => { if (Z.dir > 0) ctx.transform(0, -s, s, 0, ox, oy + s*vh); else ctx.transform(0, s, -s, 0, ox + s*vw, oy); };
+  const B = Z.boxes, clear = new Path2D();
+  for (const b of B){ const ww = b.w*1.15; clear.roundRect(b.cx - ww/2, b.tipY - 0.05*b.w, ww, b.w*(B.length > 1 ? 3.4 : 2.6), ww/2); }
+  if (B.length > 1){ const x0 = Math.min(...B.map(b=>b.cx-b.w*0.7)), x1 = Math.max(...B.map(b=>b.cx+b.w*0.7)); const yp = Math.max(...B.map(b=>b.tipY)) + B[0].w*2.6; clear.roundRect(x0, yp, x1-x0, Z.Hc*1.2, B[0].w); }
+  ctx.save(); ctx.fillStyle = 'rgba(8,14,12,.55)'; ctx.fillRect(0, 0, cw, ch); ctx.restore();
+  ctx.save(); toCanon();
+  ctx.globalCompositeOperation = 'destination-out'; ctx.fill(clear); ctx.globalCompositeOperation = 'source-over';
+  ctx.lineWidth = 2/s; ctx.strokeStyle = good ? '#3fd08a' : 'rgba(255,255,255,.75)'; ctx.stroke(clear);
+  B.forEach((b, i) => { const x = st?.[i];
+    ctx.lineWidth = 4/s; ctx.strokeStyle = good || x?.rid ? '#3fd08a' : x?.occ ? '#f2c14b' : 'rgba(255,255,255,.95)';
+    ctx.strokeRect(b.cx - b.w*0.575, b.tipY, b.w*1.15, b.L); });
+  ctx.restore();
+}
+
 // Caméra des doigts : état et réouverture. Sur iPhone, la photo pleine définition reconfigure le capteur ;
 // l'aperçu peut rester figé ou vide (vidéo 0 × 0) alors que la piste se dit active : on le détecte et on rouvre.
 let fingerCam = null;
@@ -1592,7 +1823,7 @@ async function runFingers(){
     while (true){
       if (S.abort){ stopStreams(); return false; }
       if (!cameraHealthy(video)){ instr($('handInstr'), 'Réouverture de la caméra…', 'L\'aperçu s\'est interrompu après la photo. Gardez la main en place.', 'alert'); await reviveFingerCamera('aperçu interrompu avant la prise'); }
-      const r = LAYOUT === 'cadre' ? await captureHandFrame(step) : await captureHand(step);
+      const r = LAYOUT !== 'cadre' ? await captureHand(step) : GABARIT === 'cadres' ? await captureHandBoxes(step) : await captureHandFrame(step);
       if (!r) return false;
       if (r.error){ log('empreintes : '+r.error); for (const st of STEPS) if (!S.hands[st.id]) (S.handStatus ||= {})[st.id] = r.error; stopStreams(); return false; }
       if (r.exception){ S.hands[step.id] = { exception: r.exception, fingers: [], good: 0, ppi: 0 }; log(`${step.label.toLowerCase()} : exception déclarée — ${r.exception}`); break; }
@@ -1908,8 +2139,8 @@ $('b-send').onclick = async () => {
 $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
-if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, zoneFor, segmentZone, canonSample, scaleZone, processZone, captureStillZone, captureHandFrame, patchCoherence, ridgePeriod, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v22 · 3 octobre 2026';
+if (location.hash === '#debug') window.__proto = { S, CFG, captureHandBoxes, processBoxes, boxColors, boxOccupancy, runFingers, cameraHealthy, zoneFor, segmentZone, canonSample, scaleZone, processZone, captureStillZone, captureHandFrame, patchCoherence, ridgePeriod, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+const VERSION = 'v23 · 3 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND + ' · gabarit ' + GABARIT;
 log('prototype chargé — ' + VERSION);
 </script>

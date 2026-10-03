@@ -28,9 +28,12 @@ Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en 
 
 ## Capture des empreintes
 
-Depuis la v22, le gabarit par défaut reprend l'aspect de la v19 (un cadre par doigt, silhouette de la main) mais
-avec une taille **fixe** à l'écran, identique d'une session et d'un téléphone à l'autre ; les cadres guident sans
-contraindre (la découpe suit le doigt mesuré). La zone unique de la v21 reste disponible avec `?gabarit=zone`.
+Depuis la v23, avec le gabarit par défaut (« cadres », aspect de la v19, taille fixe à l'écran), **le cadre fait foi** :
+le module ne cherche plus à compter les doigts ni à suivre leurs bouts. Il vérifie seulement, cadre par cadre, que
+le cadre est occupé par de la peau et que les crêtes y sont nettes. Trois consignes seulement : placer les bouts
+de doigts dans les cadres, ajuster doucement la distance jusqu'à ce que les cadres passent au vert, ne plus bouger.
+Couleur des cadres : blanc = vide, jaune = occupé, vert = crêtes nettes. La capture part dès que trois cadres sur
+quatre sont verts. La zone unique de la v21 reste disponible avec `?gabarit=zone`.
 
 Dans les deux cas, la main se présente de côté dans un gabarit fixe, comme le visage dans son ovale : paume vers
 l'objectif, doigts légèrement écartés et pointés vers le bord de l'écran (vers la gauche pour la main droite,
