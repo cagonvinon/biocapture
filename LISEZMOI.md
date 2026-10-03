@@ -83,6 +83,19 @@ doigts retenus), puis la capture reprend.
 Objectif utilisé pour les doigts : la caméra principale par défaut. Pour essayer un autre objectif, ajouter
 `?objectif=tele` ou `?objectif=ultra` à l'adresse. Le journal indique la résolution réellement obtenue.
 
+## Version 25 : tous les doigts, extraction renforcée
+
+- **Tous les doigts sont requis** (moins ceux déclarés absents) ; passé 20 secondes, la prise peut partir avec un
+  doigt de moins, signalé au récapitulatif. Jusqu'à trois prises par étape ; la meilleure est conservée.
+- **Exception par doigt** : « Doigt absent ou blessé » permet de désigner le ou les doigts concernés et le motif
+  (amputation, blessure ou pansement). Le cadre du doigt passe en pointillés et n'est plus attendu.
+- **Récapitulatif des dix doigts** (codes ISO/IEC 39794-4) : exploitable (nombre de minuties), illisible, hors cadre,
+  exception déclarée ou non capturé. Le même état figure dans le paquet (`doigts`).
+- **Extraction des minuties** : filtrage de Gabor orienté avant la squelettisation (méthode de Hong, Wan et Jain).
+  Sur les empreintes de l'essai du 3 octobre, on passe de 1 à 10 minuties par doigt à 49 à 87 ; sur une empreinte
+  de synthèse à minuties connues, l'extracteur retrouve exactement les minuties présentes, même avec un fort bruit.
+- **Visage** : le maillage complet de 468 points est affiché sur chaque vue.
+
 ## Acquisition complète et extraction
 
 L'acquisition est complète, comme à l'enrôlement : visage puis dix doigts (4-4-1-1). Seul le bouton
