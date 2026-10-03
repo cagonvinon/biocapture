@@ -28,29 +28,25 @@ Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en 
 
 ## Capture des empreintes
 
-Depuis la v18, la main se présente de côté dans un cadre, comme le visage dans son ovale : paume vers
+Depuis la v21, la main se présente de côté dans une **zone fixe**, comme le visage dans son ovale : paume vers
 l'objectif, doigts légèrement écartés et pointés vers le bord de l'écran (vers la gauche pour la main droite,
-vers la droite pour la main gauche), le bout de chaque doigt dans son cadre. Les pouces suivent, un par un.
+vers la droite pour la main gauche), les quatre bouts de doigts dans la zone claire. Les pouces suivent, un par un.
 
-- Les quatre doigts s'étalent sur la hauteur de l'écran : on peut s'approcher sans qu'un doigt sorte du champ.
-- Le module ne cherche plus les doigts dans toute l'image : il vérifie que chaque cadre contient un bout de
-  doigt bien placé. La feuille blanche n'est plus obligatoire ; un fond clair et uni (mur, feuille, drap)
-  reste préférable, car la peau doit se distinguer du fond.
-- La taille du cadre fixe la résolution visée (500 ppi). Si les crêtes sont illisibles à cette taille
-  (téléphone trop près pour faire la mise au point), le cadre se réduit d'une prise à l'autre, jusqu'à 250 ppi ;
-  la prise est alors marquée « sous la norme ». La résolution enregistrée est toujours mesurée sur la photo,
-  d'après la largeur des doigts.
-
-Le cadrage est tolérant : un doigt un peu décalé ou un bout de doigt légèrement en deçà du cadre est accepté,
-car la découpe suit le doigt mesuré et non le cadre. Si les doigts restent trop petits dans leur cadre pendant
-7 secondes (téléphone qui ne peut pas s'approcher davantage), le cadre se réduit de 10 %.
-
-Quand la photo du navigateur n'est pas nettement plus définie que la vidéo (moins de 1,3 fois), le prototype ne la prend pas
-et utilise l'image la plus nette de la rafale : l'aperçu n'est plus interrompu.
+- La zone ne change jamais de taille ni de place pendant la session. Elle ne présuppose ni la taille des doigts,
+  ni leur écartement, ni leur longueur relative : un seul cadre pour les quatre bouts de doigts.
+- La feuille blanche n'est plus obligatoire : la couleur du fond est prise devant la zone, celle de la peau au
+  pied de la zone. Un fond clair et uni reste préférable.
+- La capture se déclenche quand les **crêtes sont visibles** sur chaque doigt (mesure de netteté prise à la
+  définition native), à partir de 250 ppi : chacun trouve ainsi la distance où son téléphone fait la mise au point.
+- L'**échelle** est mesurée de deux façons indépendantes de la taille de la main : largeur des doigts et
+  écartement des crêtes (0,46 mm en moyenne chez l'adulte), combinées (60 % crêtes, 40 % largeur).
 
 L'ancienne disposition (main à plat sur une feuille blanche, doigts vers le haut) reste accessible en ajoutant
 `?disposition=fond` à l'adresse. Sur iPhone, `?objectif=triple` essaie la caméra virtuelle qui bascule
 automatiquement en mode macro.
+
+Quand la photo du navigateur n'est pas nettement plus définie que la vidéo (moins de 1,3 fois), le prototype ne
+la prend pas et utilise l'image la plus nette de la rafale : l'aperçu n'est pas interrompu.
 
 ## Résolution : ce que permet le navigateur
 

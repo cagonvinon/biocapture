@@ -270,12 +270,13 @@ const CFG = {
     MIN_MINUTIAE: 12,          // minuties fiables requises pour qu'un doigt soit exploitable
     COHERENCE_MIN: 0.45,       // cohérence d'orientation minimale : écarte le bruit du fond et les zones floues
     MIN_AREA_MM2: 60,          // surface de crêtes lisibles minimale (mm²) pour un doigt exploitable
-    // disposition latérale guidée par un cadre
-    FRAME_FILL: [0.75, 1.3],   // largeur du doigt / largeur du cadre acceptée
+    // disposition latérale, zone fixe
+    ZONE: { longueur: 0.86, pouce: 0.40, profondeur: 0.50, marge: 0.07, bout_max: 0.62 }, // proportions de la partie visible ; bout_max : profondeur maximale du bout des doigts dans la zone
     CONTRAST_MIN: 40,          // écart de couleur minimal peau / fond (RVB)
-    FRAME_PPI_FLOOR: 250,      // le cadre ne descend pas sous cette résolution (prise alors « sous la norme »)
-    FRAME_STEP: 0.82,
-    FRAME_ADAPT_MS: 7000,      // doigts trop petits pendant ce délai : le cadre se réduit de 10 %          // réduction du cadre après une prise aux crêtes illisibles
+    RIDGE_COH: 0.45,           // cohérence d'orientation à partir de laquelle les crêtes sont jugées visibles
+    RIDGE_MM: 0.46,            // écartement moyen des crêtes chez l'adulte (mm), pour l'échelle
+    FRAME_PPI_FLOOR: 250,      // résolution minimale de déclenchement (prise alors « sous la norme » sous PPI_MIN)
+    FOCUS_HINT_PPI: 420,       // au-delà, des crêtes floues signalent plutôt un téléphone trop proche
   },
   // longueur approximative articulation distale → extrémité (mm), adulte
   PHALANX_MM: { index: 22, middle: 23, ring: 22, pinky: 19, thumb: 25 },
@@ -1141,59 +1142,42 @@ async function captureHand(step){
   });
 }
 /* ---------------------------------------------------------------------
-   Disposition latérale guidée par un cadre (depuis la v18)
-   Comme pour le visage, un gabarit indique où placer la main : main de côté,
-   doigts légèrement écartés pointés vers le bord de l'écran (gauche pour la main
-   droite, droite pour la main gauche), un cadre par bout de doigt.
-   - Les quatre doigts s'étalent sur le grand côté de l'image : on peut s'approcher
-     jusqu'à la limite de mise au point sans qu'un doigt sorte du champ.
-   - On ne cherche plus les doigts dans toute l'image : on vérifie seulement que
-     chaque cadre contient un bout de doigt. Plus de feuille blanche obligatoire,
-     et un calcul léger, adapté aux terminaux d'entrée de gamme.
-   - La taille du cadre fixe la résolution visée ; s'il est impossible d'obtenir
-     des crêtes lisibles à cette taille (mise au point trop proche), le cadre se
-     réduit d'une prise à l'autre jusqu'à un plancher, et la prise est alors
-     marquée « sous la norme ».
+   Disposition latérale, zone fixe (depuis la v21)
+   Comme le visage dans son ovale, la main se présente dans une zone dessinée
+   sur l'aperçu : main de côté, doigts légèrement écartés pointés vers le bord
+   de l'écran (gauche pour la main droite, droite pour la main gauche).
+   - La zone est FIXE : même taille et même place pendant toute la session,
+     quels que soient la main, la distance ou le téléphone.
+   - Elle ne présuppose ni la taille des doigts, ni leur écartement, ni leur
+     longueur relative : un cadre unique pour les quatre bouts de doigts.
+   - La capture se déclenche quand les crêtes sont visibles (netteté et
+     résolution suffisantes), mesurées directement sur chaque doigt.
+   - L'échelle est mesurée de deux façons indépendantes de la taille de la main :
+     largeur des doigts et écartement des crêtes (≈ 0,46 mm chez l'adulte),
+     puis combinée.
    Calculs dans la vue « redressée » : image tournée d'un quart de tour pour que
    les doigts pointent vers le haut (sens habituel des empreintes).
    --------------------------------------------------------------------- */
 const LAYOUT = new URLSearchParams(location.search).get('disposition') === 'fond' ? 'fond' : 'cadre';
-// retrait du bout de chaque doigt par rapport au majeur, main posée naturellement (mm)
-const TIP_STAGGER_MM = { index: 8, middle: 0, ring: 4, pinky: 16, thumb: 0 };
 // main droite : doigts vers la gauche de l'écran → quart de tour horaire ; main gauche : vers la droite → antihoraire
 function canonDir(step){ return step.side === 'droite' ? 1 : -1; }
 function fromCanon(xc, yc, vw, vh, dir){ return dir > 0 ? [yc, vh - xc] : [vw - yc, xc]; }
-// Dans la vue redressée, l'index est du côté du pouce : à droite pour la main droite, à gauche pour la main gauche
-function frameKeys(step){ if (step.kind === 'pouce') return [THUMB]; return canonDir(step) > 0 ? [FINGERS[3], FINGERS[2], FINGERS[1], FINGERS[0]] : [...FINGERS]; }
 function currentPhotoFactor(vw, vh){
   const HC = CFG.HAND, vLong = Math.max(vw, vh);
   if (!window.ImageCapture) return 1;
   const f = S.env.photoRatio || (S.env.rear?.photoMax ? S.env.rear.photoMax / vLong : HC.PHOTO_FACTOR_DEFAULT);
   return f < 1.3 ? 1 : f;     // photo sans gain réel : elle n'est pas prise (voir takeScreenPhoto)
 }
-// Gabarit en pixels de la vue redressée de la vidéo (largeur vh, hauteur vw)
-// view : partie de la vidéo réellement visible et libre à l'écran (coordonnées vidéo) ; par défaut toute l'image
-function frameLayout(step, vw, vh, ppiWanted, photoFactor, view){
-  const Wc = vh, Hc = vw, keys = frameKeys(step), gap = 4, dir = canonDir(step);
-  const v = view || { x0:0, x1:vw, y0:0, y1:vh };
-  // zone utile dans la vue redressée : xa..xb (le long de la main), ya..yb (le long des doigts)
-  const [xa, xb] = dir > 0 ? [vh - v.y1, vh - v.y0] : [v.y0, v.y1];
-  const [ya, yb] = dir > 0 ? [v.x0, v.x1] : [vw - v.x1, vw - v.x0];
-  const widths = keys.map(k => FINGER_WIDTH_MM[k.key]);
-  const total = widths.reduce((a,b)=>a+b,0) + gap*(keys.length-1);
-  const stagger = Math.max(...keys.map(k => TIP_STAGGER_MM[k.key])), wMax = Math.max(...widths);
-  const tip0 = ya + (yb - ya)*0.12;
-  let pxmm = ppiWanted / 25.4 / photoFactor;
-  // le gabarit doit tenir dans la zone visible (bouts des doigts + 1,6 largeur de phalange + un peu de doigt)
-  const fit = Math.min(0.94*(xb - xa) / total, (yb - (yb-ya)*0.03 - tip0) / (stagger + 1.8*wMax));
-  pxmm = Math.min(pxmm, fit);
-  let x = (xa + xb)/2 - total*pxmm/2;
-  const boxes = keys.map((k, i) => { const w = widths[i]*pxmm, cx = x + w/2; x += w + gap*pxmm;
-    return { finger: k, cx, tipY: tip0 + TIP_STAGGER_MM[k.key]*pxmm, w, L: 1.6*w, wmm: widths[i] }; });
-  return { boxes, pxmm, Wc, Hc, dir, ppi: pxmm*25.4*photoFactor, photoFactor };
+// Zone dans la vue redressée de la vidéo (largeur vh, hauteur vw), d'après la partie visible de l'aperçu (view)
+function zoneFor(step, vw, vh, view){
+  const dir = canonDir(step), v = view || { x0:0, x1:vw, y0:0, y1:vh };
+  const [xa, xb] = dir > 0 ? [vh - v.y1, vh - v.y0] : [v.y0, v.y1];   // le long de la main
+  const [ya, yb] = dir > 0 ? [v.x0, v.x1] : [vw - v.x1, vw - v.x0];   // le long des doigts
+  const len = (xb - xa) * (step.kind === 'pouce' ? CFG.HAND.ZONE.pouce : CFG.HAND.ZONE.longueur), dep = (yb - ya) * CFG.HAND.ZONE.profondeur;
+  const cx = (xa + xb)/2, y0 = ya + (yb - ya)*CFG.HAND.ZONE.marge;
+  return { dir, x0: cx - len/2, x1: cx + len/2, y0, y1: y0 + dep, Wc: vh, Hc: vw };
 }
-function scaleLayout(lay, k){ return { ...lay, pxmm: lay.pxmm*k, Wc: lay.Wc*k, Hc: lay.Hc*k, boxes: lay.boxes.map(b => ({ ...b, cx: b.cx*k, tipY: b.tipY*k, w: b.w*k, L: b.L*k })) }; }
-// Échantillon réduit de la vue redressée (source : vidéo ou image à l'endroit de l'écran)
+function scaleZone(Z, k){ return { ...Z, x0: Z.x0*k, x1: Z.x1*k, y0: Z.y0*k, y1: Z.y1*k, Wc: Z.Wc*k, Hc: Z.Hc*k }; }
 const anaCv = document.createElement('canvas');
 function canonSample(src, sw, sh, dir, scale){
   const W = Math.max(8, Math.round(sh*scale)), H = Math.max(8, Math.round(sw*scale));
@@ -1203,126 +1187,192 @@ function canonSample(src, sw, sh, dir, scale){
   ctx.drawImage(src, 0, 0, sw*scale, sh*scale); ctx.setTransform(1,0,0,1,0,0);
   return { d: ctx.getImageData(0,0,W,H).data, W, H };
 }
-// Vérification cadre par cadre (coordonnées de l'échantillon ; lay déjà mis à son échelle)
-function measureFrame(A, lay){
+/* Repérage des doigts dans la zone, sans fond imposé : couleur du fond prise
+   devant la zone des bouts de doigts (bande haute), couleur de la peau prise au
+   pied de la zone (pixels les plus éloignés du fond), puis suivi des bandes de
+   peau de haut en bas. Coordonnées de l'échantillon (Z à son échelle). */
+function segmentZone(A, Z, expected){
   const { d, W, H } = A;
-  const at = (x, y) => ((Math.min(H-1, Math.max(0, y|0)))*W + Math.min(W-1, Math.max(0, x|0)))*4;
-  const meanRect = (x0, y0, x1, y1) => { let r=0,g=0,b=0,n=0; const st = Math.max(1, Math.round(Math.min(x1-x0, y1-y0)/12));
-    for (let y=Math.max(0,y0|0); y<Math.min(H,y1); y+=st) for (let x=Math.max(0,x0|0); x<Math.min(W,x1); x+=st){ const i = at(x,y); r+=d[i]; g+=d[i+1]; b+=d[i+2]; n++; }
-    return n ? [r/n, g/n, b/n] : [0,0,0]; };
-  const dist2 = (p, q) => (p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2;
-  // fond : bande libre devant les bouts des doigts ; peau : cœur de chaque cadre
-  // fond : zone devant le bout de chaque cadre (dans l'image), valeur médiane des zones
-  const B = lay.boxes;
-  const fronts = B.map(b => { const y1 = b.tipY - 0.12*b.L, y0 = Math.max(0, b.tipY - 0.6*b.L); return y1 - y0 >= 3 ? meanRect(b.cx - 0.4*b.w, y0, b.cx + 0.4*b.w, y1) : null; }).filter(Boolean);
-  const bg = fronts.length ? [0,1,2].map(k => median(fronts.map(f => f[k]))) : meanRect(0, 0, W, 3);
-  // peau : médiane des cœurs de cadre (un doigt décalé n'altère pas la référence)
-  const cores = B.map(b => meanRect(b.cx-0.2*b.w, b.tipY+0.45*b.L, b.cx+0.2*b.w, b.tipY+0.9*b.L));
-  const skinRef = [0,1,2].map(k => median(cores.map(c => c[k])));
-  const res = B.map((b, bi) => {
-    const own = cores[bi], skin = dist2(own, bg) >= 0.5*dist2(skinRef, bg) ? own : skinRef;
-    const contrast = Math.sqrt(dist2(skin, bg));
-    const isSkin = (i) => { const p = [d[i], d[i+1], d[i+2]]; return dist2(p, skin) < dist2(p, bg); };
-    const xa = Math.max(0, Math.round(b.cx - 1.05*b.w)), xb = Math.min(W-1, Math.round(b.cx + 1.05*b.w));
-    const ya = Math.max(0, Math.round(b.tipY - 0.7*b.L)), yb = Math.min(H-1, Math.round(b.tipY + 1.15*b.L));
-    const rows = [];
-    for (let y=ya; y<=yb; y++){
-      // plage de peau qui recoupe l'axe attendu du doigt (la plus longue)
-      let best = null, x = xa;
-      while (x <= xb){ if (!isSkin(at(x,y))){ x++; continue; } const r0 = x; while (x <= xb && isSkin(at(x,y))) x++; const r1 = x-1;
-        if (r1 >= b.cx - 0.3*b.w && r0 <= b.cx + 0.3*b.w && (!best || r1-r0 > best[1]-best[0])) best = [r0, r1]; }
-      rows.push(best);
+  const x0 = Math.max(1, Math.round(Z.x0)), x1 = Math.min(W-2, Math.round(Z.x1)), y0 = Math.max(0, Math.round(Z.y0)), y1 = Math.min(H-1, Math.round(Z.y1));
+  const dep = y1 - y0, zl = x1 - x0;
+  const out = { fingers: [], contrast: 0, cutTop: false, touching: false, found: 0 };
+  if (dep < 12 || zl < 12) return out;
+  const at = (x, y) => (y*W + x)*4;
+  const dist2 = (i, c) => (d[i]-c[0])**2 + (d[i+1]-c[1])**2 + (d[i+2]-c[2])**2;
+  // fond : bande haute de la zone et bande devant elle (là où les bouts des doigts ne doivent pas arriver)
+  let bg = [0,0,0], nb = 0;
+  for (let y = Math.max(0, y0 - Math.round(dep*0.08)); y < y0 + Math.round(dep*0.1); y += 2) for (let x = x0; x <= x1; x += 3){ const i = at(x,y); bg[0]+=d[i]; bg[1]+=d[i+1]; bg[2]+=d[i+2]; nb++; }
+  bg = bg.map(v => v/Math.max(1,nb));
+  // peau : pied de la zone, 40 % des pixels les plus éloignés du fond
+  const foot = [];
+  for (let y = y1 - Math.round(dep*0.2); y <= y1; y += 2) for (let x = x0; x <= x1; x += 3){ const i = at(x,y); foot.push([dist2(i, bg), i]); }
+  foot.sort((a,b) => b[0]-a[0]); const kk = Math.max(1, Math.round(foot.length*0.4));
+  let sk = [0,0,0]; for (let j=0;j<kk;j++){ const i = foot[j][1]; sk[0]+=d[i]; sk[1]+=d[i+1]; sk[2]+=d[i+2]; } sk = sk.map(v => v/kk);
+  out.contrast = Math.sqrt((sk[0]-bg[0])**2 + (sk[1]-bg[1])**2 + (sk[2]-bg[2])**2);
+  if (out.contrast < CFG.HAND.CONTRAST_MIN) return out;
+  // masque peau / fond dans la zone, lissé 3 × 3
+  const ZW = zl + 1, ZH = dep + 1, raw = new Uint8Array(ZW*ZH), mask = new Uint8Array(ZW*ZH);
+  for (let y=0;y<ZH;y++) for (let x=0;x<ZW;x++){ const i = at(x0+x, y0+y); raw[y*ZW+x] = dist2(i, sk) < dist2(i, bg) ? 1 : 0; }
+  for (let y=0;y<ZH;y++) for (let x=0;x<ZW;x++){ let s=0,n=0; for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){ const xx=x+dx, yy=y+dy; if (xx<0||yy<0||xx>=ZW||yy>=ZH) continue; s+=raw[yy*ZW+xx]; n++; } mask[y*ZW+x] = s*2 > n ? 1 : 0; }
+  // suivi des bandes de peau de haut en bas : chaque doigt commence à son extrémité
+  const minRun = Math.max(3, Math.round(zl * (expected > 1 ? 0.035 : 0.12)));
+  const active = [];
+  for (let y=0;y<ZH;y++){
+    const runs = []; let x = 0;
+    while (x < ZW){ if (!mask[y*ZW+x]){ x++; continue; } const r0 = x; while (x < ZW && mask[y*ZW+x]) x++; if (x-1-r0+1 >= minRun) runs.push([r0, x-1]); }
+    const used = new Set();
+    for (const t of active){
+      if (t.closed) continue;
+      const last = t.rows.at(-1); const hits = runs.map((ru,i)=>[ru,i]).filter(([ru]) => ru[0] <= last[2] && ru[1] >= last[1]);
+      if (hits.length === 1){ const [ru,i] = hits[0];
+        const shared = active.some(o => o !== t && !o.closed && ru[0] <= o.rows.at(-1)[2] && ru[1] >= o.rows.at(-1)[1]);
+        if (shared || (t.rows.length > 8 && (ru[1]-ru[0]) > 1.7*median(t.rows.slice(-8).map(q=>q[2]-q[1])))){ t.closed = true; continue; }
+        t.rows.push([y, ru[0], ru[1]]); used.add(i); t.miss = 0; }
+      else if (hits.length > 1) t.closed = true;
+      else if (++t.miss > 2) t.closed = true;
     }
-    // bout du doigt : première ligne d'une suite de 3 lignes assez larges
-    let tip = null;
-    for (let i=0; i+2<rows.length; i++){ if ([0,1,2].every(k => rows[i+k] && rows[i+k][1]-rows[i+k][0]+1 >= 0.35*b.w)){ tip = ya + i; break; } }
-    const out = { contrast, found: tip !== null, ok: false };
-    if (tip === null) return out;
-    const mr = []; for (let y = Math.round(tip + 0.4*b.L); y <= Math.min(yb, Math.round(tip + 1.0*b.L)); y++){ const r = rows[y-ya]; if (r) mr.push([y, r]); }
-    if (mr.length < 4) return { ...out, found: false };
-    const touching = mr.filter(([,r]) => r[0] <= xa+1 || r[1] >= xb-1).length > mr.length/2;
-    const free = mr.filter(([,r]) => !(r[0] <= xa+1 || r[1] >= xb-1));
-    const use = free.length >= 4 ? free : mr;
-    const w = median(use.map(([,r]) => r[1]-r[0]+1));
-    // axe : centre des plages, ajusté par moindres carrés (x = a + pente·y)
-    let sy=0,sx=0,syy=0,sxy=0; for (const [y,r] of use){ const c=(r[0]+r[1])/2; sy+=y; sx+=c; syy+=y*y; sxy+=c*y; }
-    const m = use.length, slope = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a0 = (sx-slope*sy)/m;
-    const cxTip = a0 + slope*tip;
-    const ratio = w / b.w, dTip = (tip - b.tipY)/b.L, dX = (a0 + slope*(tip+0.6*b.L) - b.cx)/b.w;
-    // cadrage tolérant : la découpe suit le doigt mesuré, pas le cadre ; le cadre ne sert qu'à guider la distance
-    const ok = !touching && ratio >= CFG.HAND.FRAME_FILL[0] && ratio <= CFG.HAND.FRAME_FILL[1] && Math.abs(dTip) <= 0.6 && Math.abs(dX) <= 0.55 && contrast >= CFG.HAND.CONTRAST_MIN;
-    return { contrast, found: true, ok, touching, tip:[cxTip, tip], slope, w, ratio, dTip, dX };
-  });
-  return res;
+    runs.forEach((ru,i) => { if (!used.has(i)) active.push({ rows:[[y, ru[0], ru[1]]], miss:0, closed:false }); });
+  }
+  const tracks = []; let wide = false;
+  for (const t of active){
+    const n = t.rows.length; if (n < 8) continue;
+    const w0 = median(t.rows.slice(Math.floor(n*0.3), Math.max(Math.floor(n*0.3)+1, Math.floor(n*0.8))).map(q => q[2]-q[1]+1));
+    if (n < 0.9*w0){ if (w0 > 0.2*zl) wide = true; continue; }     // bloc plus large que long : doigts collés
+    // largeur et axe sur la phalange distale (0,35 à 1,3 largeur sous le bout)
+    const ty = t.rows[0][0], mid = t.rows.filter(q => q[0] >= ty + 0.35*w0 && q[0] <= ty + 1.3*w0);
+    const use = mid.length >= 4 ? mid : t.rows;
+    const w = median(use.map(q => q[2]-q[1]+1));
+    let sy=0,sx=0,syy=0,sxy=0; for (const [yy,a,b] of use){ const c=(a+b)/2; sy+=yy; sx+=c; syy+=yy*yy; sxy+=c*yy; }
+    const m = use.length, b = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a = (sx-b*sy)/m;
+    tracks.push({ tip: [x0 + a + b*ty, y0 + ty], b, w, len: n, area: n*w, cutTop: ty <= 1, depth: ty/dep });
+  }
+  out.found = tracks.length;
+  tracks.sort((p,q) => q.area - p.area);
+  const wRef = median(tracks.slice(0, expected).map(t => t.w));
+  const coherent = tracks.filter(t => t.w > wRef*0.55 && t.w < wRef*1.7);
+  // doigts collés : une bande deux fois plus large que les autres
+  out.touching = (expected > 1 && (wide || tracks.some(t => t.w > 0.2*zl))) || tracks.some(t => tracks.length > 1 && t.w >= wRef*1.7);
+  out.fingers = coherent.slice(0, expected).sort((p,q) => p.tip[0] - q.tip[0]);
+  out.cutTop = out.fingers.some(f => f.cutTop);
+  return out;
 }
-// Dessin du gabarit : la main en clair, le reste assombri, un cadre par bout de doigt
-function drawFrameOverlay(canvas, video, lay, meas, good){
+// Crêtes visibles ? Cohérence d'orientation d'une plage prise à la définition native, au milieu de la phalange
+const cohCv = document.createElement('canvas');
+function patchCoherence(src, cx, cy, size){
+  const o = Math.max(24, Math.min(112, Math.round(size)));
+  cohCv.width = o; cohCv.height = o; const ctx = cohCv.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(src, cx - size/2, cy - size/2, size, size, 0, 0, o, o);
+  const d = ctx.getImageData(0,0,o,o).data, g = new Float32Array(o*o);
+  let s=0, s2=0; for (let i=0,j=0;i<g.length;i++,j+=4){ g[i] = d[j+1]; s += g[i]; s2 += g[i]*g[i]; }
+  const m = s/g.length, sd = Math.sqrt(Math.max(0, s2/g.length - m*m)); if (sd < 1.5) return 0;
+  const B = 12; let num = 0, den = 0;
+  for (let by=1; by+B<o-1; by+=B) for (let bx=1; bx+B<o-1; bx+=B){
+    let xx=0, yy=0, xy=0;
+    for (let y=by;y<by+B;y++) for (let x=bx;x<bx+B;x++){ const i=y*o+x;
+      const gx = (g[i-o+1]+2*g[i+1]+g[i+o+1]) - (g[i-o-1]+2*g[i-1]+g[i+o-1]), gy = (g[i+o-1]+2*g[i+o]+g[i+o+1]) - (g[i-o-1]+2*g[i-o]+g[i-o+1]);
+      xx += gx*gx; yy += gy*gy; xy += gx*gy; }
+    const e = xx + yy; if (e <= 0) continue; const c = Math.sqrt((xx-yy)**2 + 4*xy*xy)/e;
+    num += c*e; den += e;
+  }
+  return den ? num/den : 0;
+}
+// Écartement moyen des crêtes sur une image à 500 ppi nominaux : profils perpendiculaires aux crêtes, autocorrélation
+function ridgePeriod(gray){
+  const W = gray.width, H = gray.height; const d = gray.getContext('2d', { willReadFrequently:true }).getImageData(0,0,W,H).data;
+  const g = new Float32Array(W*H); for (let i=0,j=0;i<g.length;i++,j+=4) g[i] = d[j+1];
+  const sample = (x, y) => { const xi = Math.max(0, Math.min(W-2, x|0)), yi = Math.max(0, Math.min(H-2, y|0)), fx = x - xi, fy = y - yi, i = yi*W + xi;
+    return g[i]*(1-fx)*(1-fy) + g[i+1]*fx*(1-fy) + g[i+W]*(1-fx)*fy + g[i+W+1]*fx*fy; };
+  const out = [];
+  for (let by = Math.round(H*0.15); by < H*0.7; by += 22) for (let bx = Math.round(W*0.22); bx < W*0.78; bx += 22){
+    let xx=0, yy=0, xy=0;
+    for (let y=by-12;y<=by+12;y++) for (let x=bx-12;x<=bx+12;x++){ if (x<1||y<1||x>=W-1||y>=H-1) continue; const i=y*W+x; const gx=g[i+1]-g[i-1], gy=g[i+W]-g[i-W]; xx+=gx*gx; yy+=gy*gy; xy+=gx*gy; }
+    const e = xx+yy; if (e <= 0) continue; const coh = Math.sqrt((xx-yy)**2+4*xy*xy)/e; if (coh < 0.5) continue;
+    const th = 0.5*Math.atan2(2*xy, xx-yy), nx = Math.cos(th), ny = Math.sin(th);   // normale aux crêtes
+    const L = 28, prof = [];
+    for (let t=-L;t<=L;t++){ let v = 0; for (let u=-4;u<=4;u+=2) v += sample(bx + t*nx - u*ny, by + t*ny + u*nx); prof.push(v/5); }
+    const mu = prof.reduce((a,b)=>a+b,0)/prof.length; const p = prof.map(v => v - mu);
+    const r = (k) => { let s=0; for (let i=0;i+k<p.length;i++) s += p[i]*p[i+k]; return s; }; const r0 = r(0); if (r0 <= 0) continue;
+    let best = 0, bk = 0, sawMin = false;
+    for (let k=3;k<=20;k++){ const v = r(k)/r0; if (!sawMin && v < 0) sawMin = true; if (sawMin && v > best && v > 0.15 && r(k-1)/r0 <= v && r(k+1)/r0 <= v){ best = v; bk = k; break; } }
+    if (bk){ const a = r(bk-1)/r0, b = r(bk)/r0, c = r(bk+1)/r0, den = a - 2*b + c; out.push(bk + (den ? 0.5*(a-c)/den : 0)); }
+  }
+  return out.length >= 3 ? { period: median(out), n: out.length } : null;
+}
+// Dessin : tout l'aperçu assombri sauf la zone ; cadres de phalange sur les doigts repérés (vert : crêtes visibles)
+function drawZoneOverlay(canvas, video, Z, fingers, good){
   const vw = video.videoWidth, vh = video.videoHeight;
   const { ctx, s, ox, oy, cw, ch } = fitCover(canvas, vw, vh);
-  ctx.save();
-  if (lay.dir > 0) ctx.transform(0, -s, s, 0, ox, oy + s*vh); else ctx.transform(0, s, -s, 0, ox + s*vw, oy);
-  const B = lay.boxes, lw = 2/s;
-  // silhouette : doigts (largeur + 15 %) et paume
-  const sil = new Path2D();
-  for (const b of B){ const ww = b.w*1.15; sil.roundRect(b.cx - ww/2, b.tipY - 0.05*b.w, ww, b.w*(B.length > 1 ? 3.4 : 2.6), ww/2); }
-  if (B.length > 1){ const x0 = Math.min(...B.map(b=>b.cx-b.w*0.7)), x1 = Math.max(...B.map(b=>b.cx+b.w*0.7)); const yp = Math.max(...B.map(b=>b.tipY)) + B[0].w*2.6; sil.roundRect(x0, yp, x1-x0, lay.Hc*1.2, B[0].w); }
-  ctx.restore();
+  const toCanon = () => { if (Z.dir > 0) ctx.transform(0, -s, s, 0, ox, oy + s*vh); else ctx.transform(0, s, -s, 0, ox + s*vw, oy); };
+  const r = Math.min(Z.x1-Z.x0, Z.y1-Z.y0)*0.12;
+  const zone = new Path2D(); zone.roundRect(Z.x0, Z.y0, Z.x1-Z.x0, Z.y1-Z.y0, r);
   ctx.save(); ctx.fillStyle = 'rgba(8,14,12,.55)'; ctx.fillRect(0, 0, cw, ch); ctx.restore();
-  ctx.save();
-  if (lay.dir > 0) ctx.transform(0, -s, s, 0, ox, oy + s*vh); else ctx.transform(0, s, -s, 0, ox + s*vw, oy);
-  ctx.globalCompositeOperation = 'destination-out'; ctx.fill(sil); ctx.globalCompositeOperation = 'source-over';
-  ctx.lineWidth = lw; ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.stroke(sil);
-  B.forEach((b, i) => { const m = meas?.[i];
-    ctx.lineWidth = 3/s; ctx.strokeStyle = good ? '#3fd08a' : m?.ok ? '#3fd08a' : m?.found ? '#f2c14b' : 'rgba(255,255,255,.9)';
-    ctx.strokeRect(b.cx - b.w*0.575, b.tipY, b.w*1.15, b.L);
-    if (m?.found){ ctx.fillStyle = '#f2c14b'; ctx.beginPath(); ctx.arc(m.tip[0], m.tip[1], 4/s, 0, Math.PI*2); ctx.fill(); }
-  });
+  ctx.save(); toCanon();
+  ctx.globalCompositeOperation = 'destination-out'; ctx.fill(zone); ctx.globalCompositeOperation = 'source-over';
+  ctx.lineWidth = 3/s; ctx.strokeStyle = good ? '#3fd08a' : 'rgba(255,255,255,.9)'; ctx.stroke(zone);
+  // flèche : sens dans lequel pointent les doigts (vers le haut de la vue redressée)
+  const ax = (Z.x0+Z.x1)/2, ay = Z.y0 - (Z.y1-Z.y0)*0.04, aw = (Z.y1-Z.y0)*0.08;
+  if (ay - aw > 0){ ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.beginPath(); ctx.moveTo(ax, ay - aw); ctx.lineTo(ax - aw*0.7, ay); ctx.lineTo(ax + aw*0.7, ay); ctx.closePath(); ctx.fill(); }
+  for (const f of fingers || []){
+    const bx = phalanxBox(f); ctx.save(); ctx.translate(bx.cx, bx.cy); ctx.rotate(bx.angle + Math.PI/2);
+    ctx.lineWidth = 3/s; ctx.strokeStyle = f.ridges ? '#3fd08a' : '#f2c14b'; ctx.strokeRect(-bx.W/2, -bx.L/2, bx.W, bx.L); ctx.restore();
+  }
   ctx.restore();
 }
 function frameIntro(step){
   const vers = step.side === 'droite' ? 'la gauche' : 'la droite';
   return step.kind === 'quatre'
-    ? [`${step.label} : quatre doigts`, `Main de côté, paume vers l'objectif, doigts pointés vers ${vers} et légèrement écartés : chaque bout de doigt dans son cadre. Un fond clair et uni facilite le repérage.`]
-    : [`${step.label}`, `Repliez les autres doigts. Pouce pointé vers ${vers}, pulpe vers l'objectif, dans le cadre.`];
+    ? [`${step.label} : quatre doigts`, `Main de côté, paume vers l'objectif, doigts légèrement écartés et pointés vers ${vers}. Les quatre bouts de doigts dans la zone claire.`]
+    : [`${step.label}`, `Repliez les autres doigts. Pouce pointé vers ${vers}, pulpe vers l'objectif, dans la zone claire.`];
 }
-// Traitement de l'image retenue (photo ou vidéo, à l'endroit de l'écran) : mesure dans le cadre, découpe à 500 ppi
-async function processFrame(img, step, lay, source, prevMeas){
-  const need = minFingers(step), dir = lay.dir;
-  const canon = rotate90(img, dir);                                      // vue redressée pleine définition
-  const s = Math.min(1, 480 / Math.min(canon.width, canon.height));
-  const A = canonSample(img, img.width, img.height, dir, s);
-  const meas = measureFrame(A, scaleLayout(lay, s));
-  const fs = [];
-  lay.boxes.forEach((b, i) => {
-    let m = meas[i], src = source;
-    if (!(m.found && m.w)){ const p = prevMeas?.[i]; if (p?.found && p.w){ m = { ...p, mapped: true }; src = source + ' (repérage de l\'aperçu)'; } else return; }
-    else m = { ...m, tip: [m.tip[0]/s, m.tip[1]/s], w: m.w/s };
-    fs.push({ key: b.finger, sf: { tip: m.tip, b: m.slope || 0, w: m.w }, wmm: b.wmm, mapped: !!m.mapped });
-  });
+// Coordonnées vidéo du milieu de la phalange distale (pour la mesure des crêtes)
+function padPoint(f, Z, vw, vh){ const n = Math.hypot(f.b, 1), t = 0.6*f.w; return fromCanon(f.tip[0] + f.b/n*t, f.tip[1] + t/n, vw, vh, Z.dir); }
+// Traitement de l'image retenue (à l'endroit de l'écran) : repérage dans la zone, échelle, découpe à 500 ppi
+async function processZone(img, step, Z, source, prevFingers){
+  const need = minFingers(step), dir = Z.dir;
+  const canon = rotate90(img, dir);
+  const s = Math.min(1, CFG.HAND.SEG_W*1.4 / Math.min(canon.width, canon.height));
+  const seg = segmentZone(canonSample(img, img.width, img.height, dir, s), scaleZone(Z, s), step.fingers.length);
+  let fs = seg.fingers.map(f => ({ ...f, tip: [f.tip[0]/s, f.tip[1]/s], w: f.w/s }));
+  let src = source;
+  if (fs.length < need && prevFingers?.length >= need){ fs = prevFingers; src = source + ' (repérage de l\'aperçu)'; }
   if (fs.length < need){
-    const e = new Error(`${fs.length} doigt(s) trouvé(s) dans le cadre sur ${lay.boxes.length} (${source}, ${img.width}×${img.height} px, contraste peau/fond ${Math.round(median(meas.map(m=>m.contrast)))})`);
+    const e = new Error(`${fs.length} doigt(s) trouvé(s) dans la zone sur ${step.fingers.length} (${source}, ${img.width}×${img.height} px, contraste peau/fond ${Math.round(seg.contrast)})`);
     const diag = newCanvas(Math.min(480, canon.width), canon.height*Math.min(480, canon.width)/canon.width); const dx = diag.getContext('2d'); dx.drawImage(canon, 0, 0, diag.width, diag.height);
-    const r = diag.width/canon.width; dx.lineWidth = 2; dx.strokeStyle = '#f2c14b'; for (const b of lay.boxes) dx.strokeRect((b.cx-b.w*0.575)*r, b.tipY*r, b.w*1.15*r, b.L*r);
+    const r = diag.width/canon.width; dx.lineWidth = 2; dx.strokeStyle = '#f2c14b'; dx.strokeRect(Z.x0*r, Z.y0*r, (Z.x1-Z.x0)*r, (Z.y1-Z.y0)*r);
     e.diag = diag; release(canon); throw e;
   }
-  const ppi = median(fs.map(f => f.sf.w / (f.wmm/25.4)));
-  const missing = lay.boxes.filter(b => !fs.some(f => f.key === b.finger)).map(b => b.finger.fr);
-  const fingers = fs.map(({ key, sf }) => {
-    const crop = cropSeg(canon, sf, ppi);
+  const keys = fingerKeys(step, fs);
+  // échelle 1 : largeur des doigts (valeurs moyennes de l'adulte)
+  const ppiW = median(fs.map((f,i) => f.w / (FINGER_WIDTH_MM[keys[i].key]/25.4)));
+  // échelle 2 : écartement des crêtes, indépendant de la taille de la main
+  const periods = [];
+  for (const f of fs){ const c = cropSeg(canon, f, ppiW); const gr = toGray(c); const rp = ridgePeriod(gr); if (rp) periods.push(rp.period); release(c, gr); }
+  let ppi = ppiW, ppiR = null;
+  if (periods.length >= Math.min(2, fs.length)){
+    const p = median(periods);                              // en pixels d'une image supposée à 500 ppi
+    ppiR = ppiW * (p * 25.4 / CFG.HAND.RIDGE_MM) / 500;     // résolution réelle déduite des crêtes
+    const c = ppiR / ppiW;
+    if (c > 0.7 && c < 1.45) ppi = Math.exp(0.4*Math.log(ppiW) + 0.6*Math.log(ppiR));  // moyenne géométrique pondérée : les crêtes varient moins d'une personne à l'autre que la largeur des doigts
+    else log(`${step.label.toLowerCase()} : échelle des crêtes écartée (${Math.round(ppiR)} ppi contre ${Math.round(ppiW)} par la largeur)`);
+  }
+  const missing = step.fingers.filter(f => !keys.includes(f)).map(f => f.fr);
+  const fingers = fs.map((sf, i) => {
+    const f = keys[i]; const crop = cropSeg(canon, sf, ppi);
     const gray = toGray(crop), q = fingerQuality(crop), ext = extractMinutiae(gray);
     q.minuties = ext.count; q.surface_mm2 = ext.area_mm2; q.coherence = ext.coherence;
     q.exploitable = q.glare < 0.12 && ext.count >= CFG.HAND.MIN_MINUTIAE && ext.area_mm2 >= CFG.HAND.MIN_AREA_MM2;
-    return { finger: key, code: key.code[step.side], crop: gray, enhanced: ridgeEnhance(crop), q, ext };
+    const enhanced = ridgeEnhance(crop); release(crop);
+    return { finger: f, code: f.code[step.side], crop: gray, enhanced, q, ext };
   }).sort((p,q) => step.fingers.indexOf(p.finger) - step.fingers.indexOf(q.finger));
-  const overview = makeDiag(canon, { fingers: fs.map(f => f.sf) });
+  const overview = makeDiag(canon, { fingers: fs });
   release(canon);
   const good = fingers.filter(x => x.q.exploitable).length;
   const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push(`sous la norme (${Math.round(ppi)} ppi < ${CFG.HAND.PPI_MIN})`); if (missing.length) flags.push(`non repéré : ${missing.join(', ')}`);
-  if (fs.some(f => f.mapped)) flags.push('repérage repris de l\'aperçu');
-  log(`${step.label.toLowerCase()} : ${source} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (largeur des doigts, cadre visé ${Math.round(lay.ppi)}), ${good}/${fingers.length} exploitable(s), minuties ${fingers.map(x=>x.q.minuties).join('/')}${flags.length ? ' — ' + flags.join(', ') : ''}`);
-  return { fingers, overview, ppi, scale: 'largeur des doigts', source, flags, good, frameSize: [img.width, img.height], cadre_ppi: Math.round(lay.ppi), disposition: 'latérale, cadre' };
+  if (src !== source) flags.push('repérage repris de l\'aperçu');
+  const scale = ppiR && ppi !== ppiW ? 'largeur des doigts et écartement des crêtes' : 'largeur des doigts';
+  log(`${step.label.toLowerCase()} : ${src} ${img.width}×${img.height}, ${Math.round(ppi)} ppi (largeur ${Math.round(ppiW)}${ppiR ? `, crêtes ${Math.round(ppiR)}` : ''}), ${good}/${fingers.length} exploitable(s), minuties ${fingers.map(x=>x.q.minuties).join('/')}${flags.length ? ' — ' + flags.join(', ') : ''}`);
+  return { fingers, overview, ppi, ppi_largeur: Math.round(ppiW), ppi_cretes: ppiR ? Math.round(ppiR) : null, scale, source: src, flags, good, frameSize: [img.width, img.height], disposition: 'latérale, zone fixe' };
 }
-// Photo pleine définition (si le navigateur la fournit), ramenée au champ de l'aperçu ; sinon image de la rafale
 async function takeScreenPhoto(video){
   const track = S.streams.at(-1)?.getVideoTracks()[0];
   if (!(window.ImageCapture && track && track.readyState === 'live')) return null;
@@ -1344,17 +1394,16 @@ async function takeScreenPhoto(video){
   release(img);
   return { img: crop, k: cw / vw };
 }
-async function captureStillFrame(video, step, lay, prevMeas, fallback){
-  const scaleMeas = (k) => prevMeas?.map(m => m?.found && m.w ? { ...m, tip: [m.tip[0]*k, m.tip[1]*k], w: m.w*k } : m);
-  let firstErr = null;
-  let ph = null;
+async function captureStillZone(video, step, Z, prevFingers, fallback){
+  const scaleF = (k) => prevFingers?.map(f => ({ ...f, tip: [f.tip[0]*k, f.tip[1]*k], w: f.w*k }));
+  let firstErr = null, ph = null;
   try {
     ph = await takeScreenPhoto(video);
-    if (ph){ const r = await processFrame(ph.img, step, scaleLayout(lay, ph.k), 'photo du navigateur', scaleMeas(ph.k)); release(ph.img, fallback); return r; }
+    if (ph){ const r = await processZone(ph.img, step, scaleZone(Z, ph.k), 'photo du navigateur', scaleF(ph.k)); release(fallback); return r; }
   } catch(e){ firstErr = e; log('photo du navigateur : ' + (e.message || e.name)); if (!e.diag){ S.env.photoRatio = 1; } }
   finally { if (ph) release(ph.img); }
   const img = fallback || frameOf(video, true);
-  try { return await processFrame(img, step, lay, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', scaleMeas(1)); }
+  try { return await processZone(img, step, Z, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', scaleF(1)); }
   catch(e){ throw firstErr?.diag ? firstErr : e; }
   finally { release(img); }
 }
@@ -1362,11 +1411,10 @@ async function captureHandFrame(step){
   const video = $('vHand'), ov = $('oHand'), adv = makeAdvisor($('handInstr'));
   const expected = step.fingers.length, need = minFingers(step), HC = CFG.HAND, N = HC.WINDOW;
   const done = STEPS.filter(st => S.hands[st.id]).length;
-  S.env.framePpi ||= HC.PPI_TARGET;
   const intro = () => frameIntro(step);
   adv.force(...intro()); $('b-handShot').hidden = true;
-  const W = { place:new Win(N), taille:new Win(N), ecart:new Win(N), stable:new Win(N), all:new Win(N) };
-  let burst = null, fps = 0, lastT = 0, prevTips = null, paused = false, lowRetries = 0, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0, lastMeas = null, lastLay = null, viewLock = null, nFrames = 0, farSince = 0;
+  const W = { nombre:new Win(N), zone:new Win(N), resolution:new Win(N), cretes:new Win(N), stable:new Win(N), all:new Win(N) };
+  let burst = null, fps = 0, lastT = 0, prevTips = null, paused = false, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0, lastFingers = null, nFrames = 0;
   let frameCount = 0; const gen = S.handGen = (S.handGen || 0) + 1;
   const onFrame = () => { frameCount++; if (S.handGen === gen && !S.abort) video.requestVideoFrameCallback(onFrame); };
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
@@ -1380,7 +1428,7 @@ async function captureHandFrame(step){
     };
     const fail = (e) => {
       log(`${step.label.toLowerCase()} : capture impossible — ${e.message}`); (S.handStatus ||= {})[step.id] = 'dernière capture impossible : ' + e.message;
-      paused = true; $('diagTitle').textContent = 'Les doigts n\'ont pas été trouvés dans le cadre'; $('diagText').textContent = e.message;
+      paused = true; $('diagTitle').textContent = 'Les doigts n\'ont pas été trouvés dans la zone'; $('diagText').textContent = e.message;
       $('diagImg').innerHTML = ''; if (e.diag){ const c = document.createElement('canvas'); c.width = e.diag.width; c.height = e.diag.height; c.getContext('2d').drawImage(e.diag,0,0); $('diagImg').appendChild(c); }
       $('handDiag').hidden = false; $('diagCount').textContent = 'Nouvelle tentative automatique dans 4 secondes.';
       setTimeout(() => { $('handDiag').hidden = true; paused = false; adv.force(...intro()); }, 4000);
@@ -1389,7 +1437,7 @@ async function captureHandFrame(step){
       if (S.abort || !S.streams.length) return resolve(null);
       if (skip) return resolve({ exception: skip });
       if (paused){ requestAnimationFrame(loop); return; }
-      // aperçu vide ou figé (constaté sur iPhone après la photo pleine définition) : réouverture automatique
+      // aperçu vide ou figé (constaté sur iPhone après une photo) : réouverture automatique
       const vt = video.requestVideoFrameCallback ? frameCount : video.currentTime, nowW = performance.now();
       if (vt !== lastVT){ lastVT = vt; frozenSince = nowW; }
       if (!(cameraHealthy(video) && nowW - frozenSince < 2500)){
@@ -1407,79 +1455,62 @@ async function captureHandFrame(step){
       stallSince = 0;
       if (sessionLeft() === 0) return resolve({ error:'session expirée' });
       const vw = video.videoWidth, vh = video.videoHeight;
-      const pf = currentPhotoFactor(vw, vh);
-      // zone visible de l'aperçu (recadrage « cover ») sous le bandeau des consignes
-      // bande réservée fixe (24 % de la hauteur) : le cadre ne bouge pas quand la consigne change de longueur
-      const vr = ov.getBoundingClientRect();
-      const sc = Math.max(vr.width/vw, vr.height/vh), ox = (vr.width - vw*sc)/2, oy = (vr.height - vh*sc)/2;
-      const top = vr.height*0.24;
-      // zone figée après quelques images (les pastilles d'état modifient la hauteur de l'aperçu au démarrage)
-      if (!viewLock || viewLock.vw !== vw || nFrames < 6) viewLock = vr.width ? { vw, x0: -ox/sc, x1: (vr.width - ox)/sc, y0: (top - oy)/sc, y1: (vr.height - oy - 6)/sc } : null;
+      // zone FIXE : calculée une fois pour la session, d'après la partie visible de l'aperçu sous le bandeau des consignes
       nFrames++;
-      const lay = frameLayout(step, vw, vh, S.env.framePpi, pf, viewLock);
+      if (!S.env.zoneView || S.env.zoneView.vw !== vw || S.env.zoneView.vh !== vh){
+        if (nFrames < 4){ requestAnimationFrame(loop); return; }        // on laisse l'écran se mettre en place
+        const vr = ov.getBoundingClientRect(); const sc = Math.max(vr.width/vw, vr.height/vh), ox = (vr.width - vw*sc)/2, oy = (vr.height - vh*sc)/2;
+        S.env.zoneView = { vw, vh, x0: Math.max(0, -ox/sc), x1: Math.min(vw, (vr.width - ox)/sc), y0: Math.max(0, (vr.height*0.24 - oy)/sc), y1: Math.min(vh, (vr.height*0.97 - oy)/sc) };
+        log(`zone fixe des empreintes : ${Math.round(S.env.zoneView.x1 - S.env.zoneView.x0)}×${Math.round(S.env.zoneView.y1 - S.env.zoneView.y0)} px de vidéo visibles`);
+      }
+      const Z = zoneFor(step, vw, vh, S.env.zoneView);
+      const pf = currentPhotoFactor(vw, vh);
       const s = HC.SEG_W / Math.min(vw, vh);
-      const A = canonSample(video, vw, vh, lay.dir, s);
-      const ms = measureFrame(A, scaleLayout(lay, s));
-      const meas = ms.map(m => m.found ? { ...m, tip: [m.tip[0]/s, m.tip[1]/s], w: m.w/s } : m);  // en pixels de la vue redressée de la vidéo
-      const found = meas.filter(m => m.found), okN = meas.filter(m => m.ok).length;
-      const contrast = median(meas.map(m => m.contrast));
-      const ratio = found.length ? median(found.map(m => m.ratio)) : 0, dTip = found.length ? median(found.map(m => m.dTip)) : 0;
-      const tips = meas.map(m => m.found ? m.tip : null);
-      let moved = 1; if (prevTips && found.length >= need){ const dd = tips.map((t,i) => t && prevTips[i] ? Math.hypot(t[0]-prevTips[i][0], t[1]-prevTips[i][1]) : null).filter(v => v !== null); if (dd.length) moved = Math.max(...dd)/lay.Wc; }
+      const seg = segmentZone(canonSample(video, vw, vh, Z.dir, s), scaleZone(Z, s), expected);
+      const fingers = seg.fingers.map(f => ({ ...f, tip: [f.tip[0]/s, f.tip[1]/s], w: f.w/s }));
+      const n = fingers.length;
+      const keys = n ? fingerKeys(step, fingers) : [];
+      const ppiNow = n ? median(fingers.map((f,i) => f.w / (FINGER_WIDTH_MM[keys[i].key]/25.4))) * pf : null;
+      // crêtes visibles sur chaque doigt (plage prise à la définition native)
+      for (const f of fingers){ const [px, py] = padPoint(f, Z, vw, vh); f.coh = patchCoherence(video, px, py, 0.55*f.w); f.ridges = f.coh >= HC.RIDGE_COH; }
+      const nR = fingers.filter(f => f.ridges).length;
+      const tips = fingers.map(f => f.tip);
+      let moved = 1; if (prevTips?.length === n && n >= need) moved = Math.max(...tips.map((p,i) => Math.hypot(p[0]-prevTips[i][0], p[1]-prevTips[i][1]))) / Z.Wc;
       prevTips = tips;
-      const c = { place: found.length >= need && contrast >= HC.CONTRAST_MIN, taille: found.length >= need && ratio >= HC.FRAME_FILL[0] && ratio <= HC.FRAME_FILL[1], ecart: !found.some(m => m.touching), stable: moved < HC.MOVE_MAX };
-      c.all = okN >= need && c.stable;
+      const deep = n && fingers.some(f => f.depth > HC.ZONE.bout_max);
+      const c = { nombre: n >= need && !seg.touching, zone: n >= need && !seg.cutTop && !deep, resolution: !!ppiNow && ppiNow >= HC.FRAME_PPI_FLOOR && ppiNow <= HC.PPI_MAX, cretes: nR >= need, stable: moved < HC.MOVE_MAX };
+      c.all = c.nombre && c.zone && c.resolution && c.cretes && c.stable;
       for (const key of Object.keys(W)) W[key].push(c[key]);
-      if (found.length >= need){ lastMeas = meas; lastLay = lay; }
+      if (n >= need) lastFingers = fingers;
       const ck = (key, bad='warn') => W[key].ok(0.5) ? 'ok' : bad;
-      const ppiNow = found.length ? median(found.map((m,i) => m.w / (lay.boxes[meas.indexOf(m)].wmm/25.4))) * pf : null;
-      chips($('handChips'), [[`${okN}/${expected} dans le cadre`, okN >= need ? 'ok' : found.length ? 'warn' : 'ko'], [`≈ ${ppiNow ? Math.round(ppiNow) : '—'} ppi`, ck('taille')], ['fond contrasté', ck('place')], ['écartés', ck('ecart')], ['stable', ck('stable')]]);
+      chips($('handChips'), [[`${n}/${expected} doigt${expected > 1 ? 's' : ''}`, ck('nombre','ko')], ['dans la zone', ck('zone')], [`≈ ${ppiNow ? Math.round(ppiNow) : '—'} ppi`, ck('resolution')], [`crêtes ${nR}/${n || expected}`, ck('cretes')], ['stable', ck('stable')]]);
       const now = performance.now(); fps = fps ? fps*0.8 + 0.2*(1000/Math.max(1, now - lastT)) : 0; lastT = now;
-      $('handMetrics').innerHTML = `${fps ? `<b>${fps.toFixed(0)}</b> img/s ` : ''}cadre <b>${Math.round(lay.ppi)} ppi</b> contraste <b>${Math.round(contrast)}</b> remplissage <b>${found.length ? Math.round(ratio*100) + ' %' : '—'}</b> photo × <b>${pf.toFixed(1)}</b> vidéo <b>${vw}×${vh}</b>`;
+      $('handMetrics').innerHTML = `${fps ? `<b>${fps.toFixed(0)}</b> img/s ` : ''}contraste <b>${Math.round(seg.contrast)}</b> netteté des crêtes <b>${n ? fingers.map(f => f.coh.toFixed(2)).join(' ') : '—'}</b> vidéo <b>${vw}×${vh}</b>`;
       $('handStep').textContent = `visage ${S.face.reference ? '✓' : '✗'} · prises ${done}/4 · ${step.label.toLowerCase()} · essai ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
 
-      // doigts trop petits dans le cadre pendant longtemps : le téléphone ne peut sans doute pas s'approcher davantage
-      // (mise au point) → le cadre se réduit progressivement, sans descendre sous le plancher
-      if (found.length >= need && ratio < HC.FRAME_FILL[0]){
-        farSince ||= now;
-        if (now - farSince > HC.FRAME_ADAPT_MS && S.env.framePpi > HC.FRAME_PPI_FLOOR){
-          const nv = Math.max(HC.FRAME_PPI_FLOOR, Math.round(Math.min(S.env.framePpi, lay.ppi)*0.9));
-          log(`cadre réduit : ${Math.round(lay.ppi)} → ${nv} ppi visés (doigts restés trop petits dans le cadre)`); S.env.framePpi = nv; farSince = 0;
-          adv.force('Le cadre s\'adapte à votre téléphone', 'Gardez les doigts dans les cadres, à la distance où l\'image est nette.');
-        }
-      } else farSince = 0;
-      if (found.length < need) contrast < HC.CONTRAST_MIN && found.length ? adv.set('Fond trop proche de la peau', 'Présentez la main devant une surface claire et unie (mur, feuille, drap).') : adv.set(...intro());
-      else if (!W.ecart.ok(0.5)) adv.set('Écartez légèrement les doigts', 'Un petit espace entre chaque doigt suffit.');
-      else if (okN >= need) W.stable.ok(0.5) ? adv.set('Ne bougez plus', 'Capture en cours…', 'good') : adv.set('Ne bougez plus', 'Main et téléphone immobiles.');
-      else if (ratio < HC.FRAME_FILL[0]) adv.set('Rapprochez le téléphone', 'Les doigts doivent remplir leur cadre.');
-      else if (ratio > HC.FRAME_FILL[1]) adv.set('Éloignez un peu le téléphone', 'Les doigts débordent de leur cadre.');
-      else if (dTip < -0.6) adv.set('Reculez un peu la main', 'Le bout des doigts dépasse des cadres.');
-      else if (dTip > 0.6) adv.set('Avancez les doigts', 'Le bout de chaque doigt doit atteindre son cadre.');
-      else adv.set('Alignez chaque doigt sur son cadre', `${okN} doigt(s) bien placé(s) sur ${expected}.`);
-      drawFrameOverlay(ov, video, lay, meas, W.all.ok(HC.AUTO_RATIO));
+      if (seg.contrast && seg.contrast < HC.CONTRAST_MIN) adv.set('Fond trop proche de la peau', 'Présentez la main devant une surface claire et unie (mur, feuille, drap).');
+      else if (n < need) seg.touching ? adv.set('Écartez légèrement les doigts', 'Un petit espace entre chaque doigt suffit.') : adv.set(...intro());
+      else if (seg.cutTop) adv.set('Reculez un peu la main', 'Le bout des doigts dépasse de la zone.');
+      else if (deep) adv.set('Avancez les doigts', 'Les bouts des doigts doivent entrer dans la zone claire.');
+      else if (ppiNow < HC.FRAME_PPI_FLOOR) adv.set('Rapprochez le téléphone', 'Les doigts sont trop petits à l\'écran.');
+      else if (ppiNow > HC.PPI_MAX) adv.set('Éloignez le téléphone', 'Trop près pour la mise au point.');
+      else if (!W.cretes.ok(0.5)) ppiNow > HC.FOCUS_HINT_PPI ? adv.set('Éloignez un peu le téléphone', 'Les crêtes ne sont pas encore nettes : la mise au point demande un peu de recul.') : adv.set('Ne bougez pas', 'Mise au point en cours : les crêtes doivent devenir nettes. Allumez la torche si la pièce est sombre.');
+      else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Main et téléphone immobiles.');
+      else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
+      drawZoneOverlay(ov, video, Z, fingers, W.all.ok(HC.AUTO_RATIO));
 
       if (burst){
-        if (okN >= need){ let sh = 0; for (const m of meas) if (m.found){ const [x,y] = fromCanon(m.tip[0], m.tip[1] + 0.6*m.w, vw, vh, lay.dir); sh += videoSharpness(video, { cx:x, cy:y, W:m.w, L:m.w }); }
-          if (sh > burst.sharp){ burst.sharp = sh; burst.meas = meas; burst.lay = lay; if (!burst.canvas) burst.canvas = tmpCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); } }
+        if (n >= need){ const sc = fingers.reduce((a,f) => a + f.coh, 0);
+          if (sc > burst.score){ burst.score = sc; burst.fingers = fingers; if (!burst.canvas) burst.canvas = tmpCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); } }
         if (++burst.count >= HC.BURST_FRAMES){
           const b = burst; burst = null;
-          log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, cadre ${Math.round((b.lay || lay).ppi)} ppi, netteté retenue ${b.sharp.toFixed(0)}`);
-          try {
-            const r = await captureStillFrame(video, step, b.lay || lastLay || lay, b.meas || lastMeas, b.canvas); r.mode = 'automatique';
-            // résolution réelle très en dessous du cadre : l'estimation photo / vidéo était fausse ; elle est maintenant mesurée → nouvelle prise
-            if (r.ppi < 0.8*(b.lay || lay).ppi && lowRetries < 2){
-              lowRetries++; W.all.reset();
-              log(`${step.label.toLowerCase()} : ${Math.round(r.ppi)} ppi réels pour un cadre à ${Math.round((b.lay || lay).ppi)} — cadre recalculé, prise refaite`);
-              adv.force('Nouvelle prise', `Résolution mesurée sur la photo : ${Math.round(r.ppi)} ppi. Le cadre s'ajuste.`, 'alert');
-              requestAnimationFrame(loop); return;
-            }
-            return resolve(r);
-          }
+          log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté des crêtes retenue ${(b.score / Math.max(1, b.fingers?.length || 1)).toFixed(2)}`);
+          try { const r = await captureStillZone(video, step, Z, b.fingers || lastFingers, b.canvas); r.mode = 'automatique'; return resolve(r); }
           catch(e){ W.all.reset(); fail(e); }
         }
       } else if (W.all.ok(HC.AUTO_RATIO)){
         adv.force('Capture en cours…', 'Ne bougez pas.', 'good');
-        burst = { count: 0, sharp: -1, meas: null, lay: null, canvas: null };
+        burst = { count: 0, score: -1, fingers: null, canvas: null };
       }
       requestAnimationFrame(loop);
     };
@@ -1533,11 +1564,6 @@ async function runFingers(){
       if (r.exception){ S.hands[step.id] = { exception: r.exception, fingers: [], good: 0, ppi: 0 }; log(`${step.label.toLowerCase()} : exception déclarée — ${r.exception}`); break; }
       if (r.good >= need){ S.hands[step.id] = r; instr($('handInstr'), `${step.label} : prise enregistrée`, (n > 1 ? `${r.good} doigts exploitables sur ${n}` : 'Empreinte exploitable') + ` · ${Math.round(r.ppi)} ppi.`, 'good'); await new Promise(x=>setTimeout(x,1500)); break; }
       S.hands.attempts[step.id]++;
-      // crêtes illisibles à la taille du cadre (mise au point trop proche, flou) : le cadre se réduit pour la prise suivante
-      if (LAYOUT === 'cadre' && r.ppi && S.env.framePpi > CFG.HAND.FRAME_PPI_FLOOR){
-        const nv = Math.max(CFG.HAND.FRAME_PPI_FLOOR, Math.round(Math.min(S.env.framePpi, r.ppi)*CFG.HAND.FRAME_STEP));
-        log(`cadre réduit : ${S.env.framePpi} → ${nv} ppi visés (crêtes peu lisibles à ${Math.round(r.ppi)} ppi)`); S.env.framePpi = nv;
-      }
       if (S.hands.attempts[step.id] >= CFG.MAX_ATTEMPTS){ S.hands[step.id] = r; log(`${step.label.toLowerCase()} : tentatives épuisées, dernière prise conservée pour examen`); break; }
       instr($('handInstr'), 'Empreintes peu lisibles', `${r.good} exploitable(s) sur ${n}. Essuyez vos doigts, allumez la torche et recommencez.`, 'alert');
       await new Promise(x=>setTimeout(x,2500));
@@ -1848,8 +1874,8 @@ $('b-send').onclick = async () => {
 $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
-if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, frameLayout, measureFrame, canonSample, scaleLayout, processFrame, captureStillFrame, captureHandFrame, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v20 · 3 octobre 2026';
+if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, zoneFor, segmentZone, canonSample, scaleZone, processZone, captureStillZone, captureHandFrame, patchCoherence, ridgePeriod, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
+const VERSION = 'v21 · 3 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>
