@@ -1169,15 +1169,35 @@ function currentPhotoFactor(vw, vh){
   return f < 1.3 ? 1 : f;     // photo sans gain réel : elle n'est pas prise (voir takeScreenPhoto)
 }
 // Zone dans la vue redressée de la vidéo (largeur vh, hauteur vw), d'après la partie visible de l'aperçu (view)
+// Gabarit : « cadres » (défaut, un cadre par doigt comme en v19, mais de taille fixe) ou « zone » (?gabarit=zone, v21)
+const GABARIT = new URLSearchParams(location.search).get('gabarit') === 'zone' ? 'zone' : 'cadres';
+// retrait du bout de chaque doigt par rapport au majeur, main naturelle (mm) ; sert seulement au dessin des cadres
+const TIP_STAGGER_MM = { index: 8, middle: 0, ring: 4, pinky: 16, thumb: 0 };
+// Dans la vue redressée, l'index est du côté du pouce : à droite pour la main droite, à gauche pour la main gauche
+function frameKeys(step){ if (step.kind === 'pouce') return [THUMB]; return canonDir(step) > 0 ? [FINGERS[3], FINGERS[2], FINGERS[1], FINGERS[0]] : [...FINGERS]; }
 function zoneFor(step, vw, vh, view){
   const dir = canonDir(step), v = view || { x0:0, x1:vw, y0:0, y1:vh };
   const [xa, xb] = dir > 0 ? [vh - v.y1, vh - v.y0] : [v.y0, v.y1];   // le long de la main
   const [ya, yb] = dir > 0 ? [v.x0, v.x1] : [vw - v.x1, vw - v.x0];   // le long des doigts
+  if (GABARIT === 'cadres'){
+    // échelle de dessin FIXE : quatre doigts moyens (73,5 mm avec les écarts) occupent 80 % de la longueur visible,
+    // quelle que soit la définition de la vidéo ; la même échelle sert aux pouces
+    const keys = frameKeys(step), gap = 4, widths = keys.map(k => FINGER_WIDTH_MM[k.key]);
+    const total = widths.reduce((a,b)=>a+b,0) + gap*(keys.length-1);
+    const pxmm = Math.min(0.80*(xb - xa)/73.5, 0.80*(yb - ya)/(16 + 1.9*16.5 + 8));
+    const tip0 = ya + (yb - ya)*0.14;
+    let x = (xa + xb)/2 - total*pxmm/2;
+    const boxes = keys.map((k, i) => { const w = widths[i]*pxmm, cx = x + w/2; x += w + gap*pxmm; return { finger: k, cx, tipY: tip0 + TIP_STAGGER_MM[k.key]*pxmm, w, L: 1.6*w }; });
+    const wMax = Math.max(...boxes.map(b => b.w)), Lmax = 1.6*wMax, stMax = Math.max(...keys.map(k => TIP_STAGGER_MM[k.key]))*pxmm;
+    return { dir, Wc: vh, Hc: vw, boxes, pxmm,
+      x0: Math.max(xa, Math.min(...boxes.map(b => b.cx - 0.9*b.w))), x1: Math.min(xb, Math.max(...boxes.map(b => b.cx + 0.9*b.w))),
+      y0: Math.max(ya, tip0 - 0.45*Lmax), y1: Math.min(yb, tip0 + stMax + 1.9*wMax) };
+  }
   const len = (xb - xa) * (step.kind === 'pouce' ? CFG.HAND.ZONE.pouce : CFG.HAND.ZONE.longueur), dep = (yb - ya) * CFG.HAND.ZONE.profondeur;
   const cx = (xa + xb)/2, y0 = ya + (yb - ya)*CFG.HAND.ZONE.marge;
   return { dir, x0: cx - len/2, x1: cx + len/2, y0, y1: y0 + dep, Wc: vh, Hc: vw };
 }
-function scaleZone(Z, k){ return { ...Z, x0: Z.x0*k, x1: Z.x1*k, y0: Z.y0*k, y1: Z.y1*k, Wc: Z.Wc*k, Hc: Z.Hc*k }; }
+function scaleZone(Z, k){ return { ...Z, x0: Z.x0*k, x1: Z.x1*k, y0: Z.y0*k, y1: Z.y1*k, Wc: Z.Wc*k, Hc: Z.Hc*k, boxes: Z.boxes?.map(b => ({ ...b, cx: b.cx*k, tipY: b.tipY*k, w: b.w*k, L: b.L*k })) }; }
 const anaCv = document.createElement('canvas');
 function canonSample(src, sw, sh, dir, scale){
   const W = Math.max(8, Math.round(sh*scale)), H = Math.max(8, Math.round(sw*scale));
@@ -1303,26 +1323,40 @@ function drawZoneOverlay(canvas, video, Z, fingers, good){
   const vw = video.videoWidth, vh = video.videoHeight;
   const { ctx, s, ox, oy, cw, ch } = fitCover(canvas, vw, vh);
   const toCanon = () => { if (Z.dir > 0) ctx.transform(0, -s, s, 0, ox, oy + s*vh); else ctx.transform(0, s, -s, 0, ox + s*vw, oy); };
-  const r = Math.min(Z.x1-Z.x0, Z.y1-Z.y0)*0.12;
-  const zone = new Path2D(); zone.roundRect(Z.x0, Z.y0, Z.x1-Z.x0, Z.y1-Z.y0, r);
+  // partie éclairée : silhouette de la main (cadres) ou zone rectangulaire
+  const clear = new Path2D();
+  if (Z.boxes){
+    const B = Z.boxes;
+    for (const b of B){ const ww = b.w*1.15; clear.roundRect(b.cx - ww/2, b.tipY - 0.05*b.w, ww, b.w*(B.length > 1 ? 3.4 : 2.6), ww/2); }
+    if (B.length > 1){ const x0 = Math.min(...B.map(b=>b.cx-b.w*0.7)), x1 = Math.max(...B.map(b=>b.cx+b.w*0.7)); const yp = Math.max(...B.map(b=>b.tipY)) + B[0].w*2.6; clear.roundRect(x0, yp, x1-x0, Z.Hc*1.2, B[0].w); }
+  } else { const r = Math.min(Z.x1-Z.x0, Z.y1-Z.y0)*0.12; clear.roundRect(Z.x0, Z.y0, Z.x1-Z.x0, Z.y1-Z.y0, r); }
   ctx.save(); ctx.fillStyle = 'rgba(8,14,12,.55)'; ctx.fillRect(0, 0, cw, ch); ctx.restore();
   ctx.save(); toCanon();
-  ctx.globalCompositeOperation = 'destination-out'; ctx.fill(zone); ctx.globalCompositeOperation = 'source-over';
-  ctx.lineWidth = 3/s; ctx.strokeStyle = good ? '#3fd08a' : 'rgba(255,255,255,.9)'; ctx.stroke(zone);
-  // flèche : sens dans lequel pointent les doigts (vers le haut de la vue redressée)
-  const ax = (Z.x0+Z.x1)/2, ay = Z.y0 - (Z.y1-Z.y0)*0.04, aw = (Z.y1-Z.y0)*0.08;
-  if (ay - aw > 0){ ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.beginPath(); ctx.moveTo(ax, ay - aw); ctx.lineTo(ax - aw*0.7, ay); ctx.lineTo(ax + aw*0.7, ay); ctx.closePath(); ctx.fill(); }
-  for (const f of fingers || []){
-    const bx = phalanxBox(f); ctx.save(); ctx.translate(bx.cx, bx.cy); ctx.rotate(bx.angle + Math.PI/2);
-    ctx.lineWidth = 3/s; ctx.strokeStyle = f.ridges ? '#3fd08a' : '#f2c14b'; ctx.strokeRect(-bx.W/2, -bx.L/2, bx.W, bx.L); ctx.restore();
+  ctx.globalCompositeOperation = 'destination-out'; ctx.fill(clear); ctx.globalCompositeOperation = 'source-over';
+  ctx.lineWidth = 2/s; ctx.strokeStyle = good ? '#3fd08a' : 'rgba(255,255,255,.75)'; ctx.stroke(clear);
+  if (Z.boxes){
+    // un cadre par doigt : vert si un doigt aux crêtes visibles s'y trouve, jaune si un doigt s'y trouve, blanc sinon
+    for (const b of Z.boxes){
+      const f = (fingers || []).find(f => Math.abs(f.tip[0] - b.cx) < 0.7*b.w && Math.abs(f.tip[1] - b.tipY) < 0.8*b.L);
+      ctx.lineWidth = 3/s; ctx.strokeStyle = good || f?.ridges ? '#3fd08a' : f ? '#f2c14b' : 'rgba(255,255,255,.95)';
+      ctx.strokeRect(b.cx - b.w*0.575, b.tipY, b.w*1.15, b.L);
+      if (f){ ctx.fillStyle = '#f2c14b'; ctx.beginPath(); ctx.arc(f.tip[0], f.tip[1], 4/s, 0, Math.PI*2); ctx.fill(); }
+    }
+  } else {
+    const ax = (Z.x0+Z.x1)/2, ay = Z.y0 - (Z.y1-Z.y0)*0.04, aw = (Z.y1-Z.y0)*0.08;
+    if (ay - aw > 0){ ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.beginPath(); ctx.moveTo(ax, ay - aw); ctx.lineTo(ax - aw*0.7, ay); ctx.lineTo(ax + aw*0.7, ay); ctx.closePath(); ctx.fill(); }
+    for (const f of fingers || []){
+      const bx = phalanxBox(f); ctx.save(); ctx.translate(bx.cx, bx.cy); ctx.rotate(bx.angle + Math.PI/2);
+      ctx.lineWidth = 3/s; ctx.strokeStyle = f.ridges ? '#3fd08a' : '#f2c14b'; ctx.strokeRect(-bx.W/2, -bx.L/2, bx.W, bx.L); ctx.restore();
+    }
   }
   ctx.restore();
 }
 function frameIntro(step){
   const vers = step.side === 'droite' ? 'la gauche' : 'la droite';
   return step.kind === 'quatre'
-    ? [`${step.label} : quatre doigts`, `Main de côté, paume vers l'objectif, doigts légèrement écartés et pointés vers ${vers}. Les quatre bouts de doigts dans la zone claire.`]
-    : [`${step.label}`, `Repliez les autres doigts. Pouce pointé vers ${vers}, pulpe vers l'objectif, dans la zone claire.`];
+    ? [`${step.label} : quatre doigts`, `Main de côté, paume vers l'objectif, doigts légèrement écartés et pointés vers ${vers}, chaque bout de doigt dans ${GABARIT === 'cadres' ? 'son cadre (à peu près)' : 'la zone claire'}. Tenez le téléphone là où l'image est nette.`]
+    : [`${step.label}`, `Repliez les autres doigts. Pouce pointé vers ${vers}, pulpe vers l'objectif, dans ${GABARIT === 'cadres' ? 'le cadre' : 'la zone claire'}.`];
 }
 // Coordonnées vidéo du milieu de la phalange distale (pour la mesure des crêtes)
 function padPoint(f, Z, vw, vh){ const n = Math.hypot(f.b, 1), t = 0.6*f.w; return fromCanon(f.tip[0] + f.b/n*t, f.tip[1] + t/n, vw, vh, Z.dir); }
@@ -1875,8 +1909,8 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, zoneFor, segmentZone, canonSample, scaleZone, processZone, captureStillZone, captureHandFrame, patchCoherence, ridgePeriod, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v21 · 3 octobre 2026';
-$('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
+const VERSION = 'v22 · 3 octobre 2026';
+$('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND + ' · gabarit ' + GABARIT;
 log('prototype chargé — ' + VERSION);
 </script>
 </body>

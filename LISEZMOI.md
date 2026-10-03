@@ -28,7 +28,11 @@ Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en 
 
 ## Capture des empreintes
 
-Depuis la v21, la main se présente de côté dans une **zone fixe**, comme le visage dans son ovale : paume vers
+Depuis la v22, le gabarit par défaut reprend l'aspect de la v19 (un cadre par doigt, silhouette de la main) mais
+avec une taille **fixe** à l'écran, identique d'une session et d'un téléphone à l'autre ; les cadres guident sans
+contraindre (la découpe suit le doigt mesuré). La zone unique de la v21 reste disponible avec `?gabarit=zone`.
+
+Dans les deux cas, la main se présente de côté dans un gabarit fixe, comme le visage dans son ovale : paume vers
 l'objectif, doigts légèrement écartés et pointés vers le bord de l'écran (vers la gauche pour la main droite,
 vers la droite pour la main gauche), les quatre bouts de doigts dans la zone claire. Les pouces suivent, un par un.
 
