@@ -271,10 +271,11 @@ const CFG = {
     COHERENCE_MIN: 0.45,       // cohérence d'orientation minimale : écarte le bruit du fond et les zones floues
     MIN_AREA_MM2: 60,          // surface de crêtes lisibles minimale (mm²) pour un doigt exploitable
     // disposition latérale guidée par un cadre
-    FRAME_FILL: [0.78, 1.2],   // largeur du doigt / largeur du cadre acceptée
+    FRAME_FILL: [0.75, 1.3],   // largeur du doigt / largeur du cadre acceptée
     CONTRAST_MIN: 40,          // écart de couleur minimal peau / fond (RVB)
     FRAME_PPI_FLOOR: 250,      // le cadre ne descend pas sous cette résolution (prise alors « sous la norme »)
-    FRAME_STEP: 0.82,          // réduction du cadre après une prise aux crêtes illisibles
+    FRAME_STEP: 0.82,
+    FRAME_ADAPT_MS: 7000,      // doigts trop petits pendant ce délai : le cadre se réduit de 10 %          // réduction du cadre après une prise aux crêtes illisibles
   },
   // longueur approximative articulation distale → extrémité (mm), adulte
   PHALANX_MM: { index: 22, middle: 23, ring: 22, pinky: 19, thumb: 25 },
@@ -432,10 +433,16 @@ async function getHuman(){
    Outils image
    --------------------------------------------------------------------- */
 function newCanvas(w,h){ const c = document.createElement('canvas'); c.width = Math.max(1,Math.round(w)); c.height = Math.max(1,Math.round(h)); S.canvases.push(c); return c; }
+// Tampons intermédiaires (photo pleine définition, rotations, rafale) : jamais conservés, libérés dès usage.
+// Sur iPhone, WebKit plafonne la mémoire totale des canevas d'une page : au-delà, les nouveaux canevas restent
+// noirs (cause des vignettes noires de l'essai du 3 octobre). Une photo de 12 Mpx occupe à elle seule 48 Mo.
+function tmpCanvas(w,h){ const c = document.createElement('canvas'); c.width = Math.max(1,Math.round(w)); c.height = Math.max(1,Math.round(h)); return c; }
+function release(...cs){ for (const c of cs) if (c && c.width !== undefined && c !== work){ try { c.getContext('2d')?.clearRect(0,0,c.width,c.height); } catch {} c.width = 0; c.height = 0; } }
+function canvasMpx(){ return S.canvases.reduce((a,c) => a + c.width*c.height, 0)/1e6; }
 // Image courante : un seul tampon réutilisé pour l'analyse ; copie conservée seulement à la capture
 const work = document.createElement('canvas');
 function frameOf(video, keep=false){
-  const c = keep ? newCanvas(video.videoWidth, video.videoHeight) : work;
+  const c = keep ? tmpCanvas(video.videoWidth, video.videoHeight) : work;
   if (!keep && (c.width !== video.videoWidth || c.height !== video.videoHeight)){ c.width = video.videoWidth; c.height = video.videoHeight; }
   c.getContext('2d').drawImage(video,0,0); return c;
 }
@@ -761,6 +768,7 @@ async function runFace(){
       S.face.features = { longueur_gabarit: ref?.length || 0, similarite_defi: sims, continuite: sims.every(v => v !== null && v >= CFG.FACE.CONTINUITY_MIN) };
       log(`caractéristiques faciales : gabarit ${ref?.length || 0} valeurs, similarité référence/défi ${sims.join(' / ')}`);
     } catch(e){ S.face.features = { erreur: e.message }; log('extraction faciale impossible : ' + e.message); }
+    release(reference.frame, bestOk.canvas, bestAny.canvas);
     log(`visage terminé — PAD passif indicatif real=${S.face.padSummary.real?.toFixed(2)} live=${S.face.padSummary.live?.toFixed(2)}`);
     return true;
   }
@@ -769,7 +777,9 @@ async function runFace(){
   if (seen){
     let tok = null; try { tok = faceToken(seen.frame, seen.M.eyeL, seen.M.eyeR); } catch { tok = seen.frame; }
     S.face.partial = { token: tok, metrics: seen.M, mode: reference ? reference.mode : 'non validée', conforme: !!reference, challenge: challengeFrames };
+    if (tok !== seen.frame) release(seen.frame);
   }
+  release(bestOk.canvas, bestAny.canvas);
   if (result?.abort){ S.face.status ||= 'capture arrêtée'; log('visage : capture arrêtée'); return false; }
   if (sessionLeft() === 0){ S.face.status = 'session expirée'; return false; }
   if (S.face.attempts >= CFG.MAX_ATTEMPTS){
@@ -807,7 +817,7 @@ function stepIntro(step){
     : [`${step.label}`, 'Repliez les autres doigts. Pouce à plat sur la feuille, pointé vers le haut de l\'écran, pulpe vers l\'objectif.'];
 }
 function rotate90(src, dir){
-  const c = newCanvas(src.height, src.width); const ctx = c.getContext('2d');
+  const c = tmpCanvas(src.height, src.width); const ctx = c.getContext('2d');
   if (dir > 0){ ctx.translate(c.width, 0); ctx.rotate(Math.PI/2); } else { ctx.translate(0, c.height); ctx.rotate(-Math.PI/2); }
   ctx.drawImage(src, 0, 0); return c;
 }
@@ -966,7 +976,7 @@ async function processImage(img, step, source, mapped){
 }
 async function loadImage(blob){
   const bmp = await createImageBitmap(blob, { imageOrientation:'from-image' });
-  const c = newCanvas(bmp.width, bmp.height); c.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.(); return c;
+  const c = tmpCanvas(bmp.width, bmp.height); c.getContext('2d').drawImage(bmp, 0, 0); bmp.close?.(); return c;
 }
 // Photo pleine résolution par le navigateur (Chrome Android) ; sinon image de la vidéo
 async function captureStill(video, step, preview, fallback){
@@ -1100,7 +1110,7 @@ async function captureHand(step){
       drawSegOverlay(ov, video, seg, W.all.ok(HC.AUTO_RATIO));
 
       if (burst){
-        if (n >= minFingers(step) && sharp > burst.sharp){ burst.sharp = sharp; burst.seg = seg; if (!burst.canvas) burst.canvas = newCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); }
+        if (n >= minFingers(step) && sharp > burst.sharp){ burst.sharp = sharp; burst.seg = seg; if (!burst.canvas) burst.canvas = tmpCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); }
         if (++burst.count >= HC.BURST_FRAMES){
           const b = burst; burst = null;
           log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, netteté retenue ${b.sharp.toFixed(0)}`);
@@ -1201,8 +1211,11 @@ function measureFrame(A, lay){
   const B = lay.boxes;
   const fronts = B.map(b => { const y1 = b.tipY - 0.12*b.L, y0 = Math.max(0, b.tipY - 0.6*b.L); return y1 - y0 >= 3 ? meanRect(b.cx - 0.4*b.w, y0, b.cx + 0.4*b.w, y1) : null; }).filter(Boolean);
   const bg = fronts.length ? [0,1,2].map(k => median(fronts.map(f => f[k]))) : meanRect(0, 0, W, 3);
-  const res = B.map(b => {
-    const skin = meanRect(b.cx-0.2*b.w, b.tipY+0.45*b.L, b.cx+0.2*b.w, b.tipY+0.9*b.L);
+  // peau : médiane des cœurs de cadre (un doigt décalé n'altère pas la référence)
+  const cores = B.map(b => meanRect(b.cx-0.2*b.w, b.tipY+0.45*b.L, b.cx+0.2*b.w, b.tipY+0.9*b.L));
+  const skinRef = [0,1,2].map(k => median(cores.map(c => c[k])));
+  const res = B.map((b, bi) => {
+    const own = cores[bi], skin = dist2(own, bg) >= 0.5*dist2(skinRef, bg) ? own : skinRef;
     const contrast = Math.sqrt(dist2(skin, bg));
     const isSkin = (i) => { const p = [d[i], d[i+1], d[i+2]]; return dist2(p, skin) < dist2(p, bg); };
     const xa = Math.max(0, Math.round(b.cx - 1.05*b.w)), xb = Math.min(W-1, Math.round(b.cx + 1.05*b.w));
@@ -1231,7 +1244,8 @@ function measureFrame(A, lay){
     const m = use.length, slope = (m*sxy-sy*sx)/((m*syy-sy*sy)||1), a0 = (sx-slope*sy)/m;
     const cxTip = a0 + slope*tip;
     const ratio = w / b.w, dTip = (tip - b.tipY)/b.L, dX = (a0 + slope*(tip+0.6*b.L) - b.cx)/b.w;
-    const ok = !touching && ratio >= CFG.HAND.FRAME_FILL[0] && ratio <= CFG.HAND.FRAME_FILL[1] && dTip >= -0.3 && dTip <= 0.35 && Math.abs(dX) < 0.35 && contrast >= CFG.HAND.CONTRAST_MIN;
+    // cadrage tolérant : la découpe suit le doigt mesuré, pas le cadre ; le cadre ne sert qu'à guider la distance
+    const ok = !touching && ratio >= CFG.HAND.FRAME_FILL[0] && ratio <= CFG.HAND.FRAME_FILL[1] && Math.abs(dTip) <= 0.6 && Math.abs(dX) <= 0.55 && contrast >= CFG.HAND.CONTRAST_MIN;
     return { contrast, found: true, ok, touching, tip:[cxTip, tip], slope, w, ratio, dTip, dX };
   });
   return res;
@@ -1284,7 +1298,7 @@ async function processFrame(img, step, lay, source, prevMeas){
     const e = new Error(`${fs.length} doigt(s) trouvé(s) dans le cadre sur ${lay.boxes.length} (${source}, ${img.width}×${img.height} px, contraste peau/fond ${Math.round(median(meas.map(m=>m.contrast)))})`);
     const diag = newCanvas(Math.min(480, canon.width), canon.height*Math.min(480, canon.width)/canon.width); const dx = diag.getContext('2d'); dx.drawImage(canon, 0, 0, diag.width, diag.height);
     const r = diag.width/canon.width; dx.lineWidth = 2; dx.strokeStyle = '#f2c14b'; for (const b of lay.boxes) dx.strokeRect((b.cx-b.w*0.575)*r, b.tipY*r, b.w*1.15*r, b.L*r);
-    e.diag = diag; throw e;
+    e.diag = diag; release(canon); throw e;
   }
   const ppi = median(fs.map(f => f.sf.w / (f.wmm/25.4)));
   const missing = lay.boxes.filter(b => !fs.some(f => f.key === b.finger)).map(b => b.finger.fr);
@@ -1296,6 +1310,7 @@ async function processFrame(img, step, lay, source, prevMeas){
     return { finger: key, code: key.code[step.side], crop: gray, enhanced: ridgeEnhance(crop), q, ext };
   }).sort((p,q) => step.fingers.indexOf(p.finger) - step.fingers.indexOf(q.finger));
   const overview = makeDiag(canon, { fingers: fs.map(f => f.sf) });
+  release(canon);
   const good = fingers.filter(x => x.q.exploitable).length;
   const flags = []; if (ppi < CFG.HAND.PPI_MIN) flags.push(`sous la norme (${Math.round(ppi)} ppi < ${CFG.HAND.PPI_MIN})`); if (missing.length) flags.push(`non repéré : ${missing.join(', ')}`);
   if (fs.some(f => f.mapped)) flags.push('repérage repris de l\'aperçu');
@@ -1306,6 +1321,8 @@ async function processFrame(img, step, lay, source, prevMeas){
 async function takeScreenPhoto(video){
   const track = S.streams.at(-1)?.getVideoTracks()[0];
   if (!(window.ImageCapture && track && track.readyState === 'live')) return null;
+  // photo déjà mesurée à la taille de la vidéo : elle n'apporte rien et interrompt l'aperçu sur iPhone → image de la rafale
+  if (S.env.photoRatio && S.env.photoRatio < 1.05){ if (!S.env.photoSkipLogged){ log('photo du navigateur pas plus définie que la vidéo : prises suivantes sur la rafale vidéo'); S.env.photoSkipLogged = true; } return null; }
   const vw = video.videoWidth, vh = video.videoHeight;
   const ic = new ImageCapture(track); let ps = {};
   try { const pc = await ic.getPhotoCapabilities(); if (pc.imageWidth?.max && pc.imageHeight?.max) ps = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max }; } catch {}
@@ -1314,21 +1331,26 @@ async function takeScreenPhoto(video){
   const ratio = Math.max(img.width, img.height) / Math.max(vw, vh);
   if (S.env.photoRatio !== ratio) log(`photo du navigateur : ${img.width}×${img.height} px (demandé ${ps.imageWidth || '—'}×${ps.imageHeight || '—'}), soit ${ratio.toFixed(2)} × la vidéo`);
   S.env.photoRatio = ratio;
-  if ((img.width > img.height) !== (vw > vh)) img = rotate90(img, 1);
+  if ((img.width > img.height) !== (vw > vh)){ const r = rotate90(img, 1); release(img); img = r; }
   const av = vw/vh, ap = img.width/img.height; let cw = img.width, ch = img.height;
   if (ap > av) cw = Math.round(ch*av); else ch = Math.round(cw/av);
-  const crop = newCanvas(cw, ch); crop.getContext('2d').drawImage(img, (img.width-cw)/2, (img.height-ch)/2, cw, ch, 0, 0, cw, ch);
+  const crop = tmpCanvas(cw, ch); crop.getContext('2d').drawImage(img, (img.width-cw)/2, (img.height-ch)/2, cw, ch, 0, 0, cw, ch);
+  release(img);
   return { img: crop, k: cw / vw };
 }
 async function captureStillFrame(video, step, lay, prevMeas, fallback){
   const scaleMeas = (k) => prevMeas?.map(m => m?.found && m.w ? { ...m, tip: [m.tip[0]*k, m.tip[1]*k], w: m.w*k } : m);
   let firstErr = null;
+  let ph = null;
   try {
-    const ph = await takeScreenPhoto(video);
-    if (ph) return await processFrame(ph.img, step, scaleLayout(lay, ph.k), 'photo du navigateur', scaleMeas(ph.k));
+    ph = await takeScreenPhoto(video);
+    if (ph){ const r = await processFrame(ph.img, step, scaleLayout(lay, ph.k), 'photo du navigateur', scaleMeas(ph.k)); release(ph.img, fallback); return r; }
   } catch(e){ firstErr = e; log('photo du navigateur : ' + (e.message || e.name)); if (!e.diag){ S.env.photoRatio = 1; } }
-  try { return await processFrame(fallback || frameOf(video, true), step, lay, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', scaleMeas(1)); }
+  finally { if (ph) release(ph.img); }
+  const img = fallback || frameOf(video, true);
+  try { return await processFrame(img, step, lay, fallback ? 'vidéo, image la plus nette de la rafale' : 'image vidéo', scaleMeas(1)); }
   catch(e){ throw firstErr?.diag ? firstErr : e; }
+  finally { release(img); }
 }
 async function captureHandFrame(step){
   const video = $('vHand'), ov = $('oHand'), adv = makeAdvisor($('handInstr'));
@@ -1338,7 +1360,7 @@ async function captureHandFrame(step){
   const intro = () => frameIntro(step);
   adv.force(...intro()); $('b-handShot').hidden = true;
   const W = { place:new Win(N), taille:new Win(N), ecart:new Win(N), stable:new Win(N), all:new Win(N) };
-  let burst = null, fps = 0, lastT = 0, prevTips = null, paused = false, lowRetries = 0, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0, lastMeas = null, lastLay = null, viewLock = null, nFrames = 0;
+  let burst = null, fps = 0, lastT = 0, prevTips = null, paused = false, lowRetries = 0, lastVT = -1, frozenSince = performance.now(), stallSince = 0, revives = 0, lastMeas = null, lastLay = null, viewLock = null, nFrames = 0, farSince = 0;
   let frameCount = 0; const gen = S.handGen = (S.handGen || 0) + 1;
   const onFrame = () => { frameCount++; if (S.handGen === gen && !S.abort) video.requestVideoFrameCallback(onFrame); };
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
@@ -1410,20 +1432,29 @@ async function captureHandFrame(step){
       $('handMetrics').innerHTML = `${fps ? `<b>${fps.toFixed(0)}</b> img/s ` : ''}cadre <b>${Math.round(lay.ppi)} ppi</b> contraste <b>${Math.round(contrast)}</b> remplissage <b>${found.length ? Math.round(ratio*100) + ' %' : '—'}</b> photo × <b>${pf.toFixed(1)}</b> vidéo <b>${vw}×${vh}</b>`;
       $('handStep').textContent = `visage ${S.face.reference ? '✓' : '✗'} · prises ${done}/4 · ${step.label.toLowerCase()} · essai ${S.hands.attempts[step.id]+1}/${CFG.MAX_ATTEMPTS}`;
 
+      // doigts trop petits dans le cadre pendant longtemps : le téléphone ne peut sans doute pas s'approcher davantage
+      // (mise au point) → le cadre se réduit progressivement, sans descendre sous le plancher
+      if (found.length >= need && ratio < HC.FRAME_FILL[0]){
+        farSince ||= now;
+        if (now - farSince > HC.FRAME_ADAPT_MS && S.env.framePpi > HC.FRAME_PPI_FLOOR){
+          const nv = Math.max(HC.FRAME_PPI_FLOOR, Math.round(Math.min(S.env.framePpi, lay.ppi)*0.9));
+          log(`cadre réduit : ${Math.round(lay.ppi)} → ${nv} ppi visés (doigts restés trop petits dans le cadre)`); S.env.framePpi = nv; farSince = 0;
+          adv.force('Le cadre s\'adapte à votre téléphone', 'Gardez les doigts dans les cadres, à la distance où l\'image est nette.');
+        }
+      } else farSince = 0;
       if (found.length < need) contrast < HC.CONTRAST_MIN && found.length ? adv.set('Fond trop proche de la peau', 'Présentez la main devant une surface claire et unie (mur, feuille, drap).') : adv.set(...intro());
       else if (!W.ecart.ok(0.5)) adv.set('Écartez légèrement les doigts', 'Un petit espace entre chaque doigt suffit.');
+      else if (okN >= need) W.stable.ok(0.5) ? adv.set('Ne bougez plus', 'Capture en cours…', 'good') : adv.set('Ne bougez plus', 'Main et téléphone immobiles.');
       else if (ratio < HC.FRAME_FILL[0]) adv.set('Rapprochez le téléphone', 'Les doigts doivent remplir leur cadre.');
       else if (ratio > HC.FRAME_FILL[1]) adv.set('Éloignez un peu le téléphone', 'Les doigts débordent de leur cadre.');
-      else if (dTip < -0.3) adv.set('Reculez un peu la main', 'Le bout des doigts dépasse des cadres.');
-      else if (dTip > 0.35) adv.set('Avancez les doigts', 'Le bout de chaque doigt doit atteindre le bord de son cadre.');
-      else if (okN < need) adv.set('Alignez chaque doigt sur son cadre', `${okN} doigt(s) bien placé(s) sur ${expected}.`);
-      else if (!W.stable.ok(0.5)) adv.set('Ne bougez plus', 'Main et téléphone immobiles.');
-      else adv.set('Ne bougez plus', 'Capture en cours…', 'good');
+      else if (dTip < -0.6) adv.set('Reculez un peu la main', 'Le bout des doigts dépasse des cadres.');
+      else if (dTip > 0.6) adv.set('Avancez les doigts', 'Le bout de chaque doigt doit atteindre son cadre.');
+      else adv.set('Alignez chaque doigt sur son cadre', `${okN} doigt(s) bien placé(s) sur ${expected}.`);
       drawFrameOverlay(ov, video, lay, meas, W.all.ok(HC.AUTO_RATIO));
 
       if (burst){
         if (okN >= need){ let sh = 0; for (const m of meas) if (m.found){ const [x,y] = fromCanon(m.tip[0], m.tip[1] + 0.6*m.w, vw, vh, lay.dir); sh += videoSharpness(video, { cx:x, cy:y, W:m.w, L:m.w }); }
-          if (sh > burst.sharp){ burst.sharp = sh; burst.meas = meas; burst.lay = lay; if (!burst.canvas) burst.canvas = newCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); } }
+          if (sh > burst.sharp){ burst.sharp = sh; burst.meas = meas; burst.lay = lay; if (!burst.canvas) burst.canvas = tmpCanvas(vw, vh); const bc = burst.canvas; if (bc.width !== vw || bc.height !== vh){ bc.width = vw; bc.height = vh; } bc.getContext('2d').drawImage(video, 0, 0); } }
         if (++burst.count >= HC.BURST_FRAMES){
           const b = burst; burst = null;
           log(`${step.label.toLowerCase()} : rafale de ${HC.BURST_FRAMES} images, cadre ${Math.round((b.lay || lay).ppi)} ppi, netteté retenue ${b.sharp.toFixed(0)}`);
@@ -1542,7 +1573,8 @@ function extractMinutiae(gray){
   const bin = new Uint8Array(N);
   for (let i=0;i<N;i++) bin[i] = fg[i] && sm[i] > 0 ? 1 : 0;
   // 5. zone utile : avant-plan érodé (les bords du doigt créent de fausses terminaisons) et orientation cohérente
-  const IF = integ(fg); const margin = 12; const core = new Uint8Array(N);
+  const IF = integ(fg); const margin = 20;   // ≈ 2 périodes de crêtes : écarte les fausses terminaisons du bord du doigt
+  const core = new Uint8Array(N);
   for (let y=margin;y<H-margin;y++) for (let x=margin;x<W-margin;x++){ const i=y*W+x; const [s,n] = box(IF,x,y,margin); core[i] = s === n && coh[i] > CFG.HAND.COHERENCE_MIN ? 1 : 0; }
   // 6. squelettisation de Zhang-Suen
   const P = (i) => [bin[i-W], bin[i-W+1], bin[i+1], bin[i+W+1], bin[i+W], bin[i+W-1], bin[i-1], bin[i-W-1]];
@@ -1588,6 +1620,14 @@ async function faceEmbedding(img){
    Étape 4 — revue
    --------------------------------------------------------------------- */
 function thumbHtml(id, label, q, cls){ return `<div class="thumb ${cls}"><div id="${id}"></div><div class="q"><span>${label}</span><b>${q}</b></div></div>`; }
+// Vignette : copie temporaire (annotée au besoin) convertie en image, puis libérée
+function mountImg(id, canvas, decorate, cls){
+  const el = $(id); if (!el || !canvas?.width) return null;
+  const c = tmpCanvas(canvas.width, canvas.height); const ctx = c.getContext('2d');
+  if (!ctx){ el.textContent = 'image non affichable (mémoire du navigateur)'; return null; }
+  ctx.drawImage(canvas, 0, 0); if (decorate) decorate(c);
+  const im = new Image(); im.src = c.toDataURL('image/jpeg', 0.85); if (cls) im.className = cls; el.appendChild(im); release(c); return im;
+}
 function mount(id, canvas){ const el = $(id); const c = document.createElement('canvas'); c.width = canvas.width; c.height = canvas.height; c.getContext('2d').drawImage(canvas,0,0); S.canvases.push(c); el.appendChild(c); return c; }
 // Bilan de l'acquisition : ce qui est complet, partiel ou absent (sert au récapitulatif et au manifeste)
 function acquisitionBilan(){
@@ -1600,17 +1640,18 @@ function acquisitionBilan(){
 }
 function renderReview(){
   stopStreams();
+  log(`récapitulatif — images conservées en mémoire : ${canvasMpx().toFixed(1)} Mpx`);
   show('s-revue');
   S.reviewShown = true;
   const fr = S.face.reference, fp = S.face.partial;
   if (fr){
     $('faceThumbs').innerHTML = thumbHtml('ft0','référence', `IED ${fr.metrics.ied.toFixed(0)}`, 'ok') + S.face.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('');
-    mount('ft0', fr.token); S.face.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+    mountImg('ft0', fr.token); S.face.challenge.forEach((c,i)=>mountImg('ft'+(i+1), c.frame));
   } else if (fp){
     // visage vu mais non validé : on montre la meilleure image et les mouvements déjà réalisés
     $('faceThumbs').innerHTML = thumbHtml('ft0', fp.conforme ? 'référence' : 'meilleure image', fp.conforme ? 'défi incomplet' : 'non conforme', 'ko') + fp.challenge.map((c,i)=>thumbHtml('ft'+(i+1), c.action, `${c.t_ms} ms`, 'ok')).join('')
       + `<p class="note" style="grid-column:1/-1">Visage non validé — ${S.face.status || 'motif inconnu'}.</p>`;
-    mount('ft0', fp.token); fp.challenge.forEach((c,i)=>mount('ft'+(i+1), c.frame));
+    mountImg('ft0', fp.token); fp.challenge.forEach((c,i)=>mountImg('ft'+(i+1), c.frame));
   } else {
     $('faceThumbs').innerHTML = `<p class="note" style="grid-column:1/-1">Visage non capturé — ${S.face.status || 'aucune image exploitable'}.</p>`;
   }
@@ -1638,9 +1679,9 @@ function renderReview(){
   for (const st of STEPS){
     const h = S.hands[st.id]; if (!h?.fingers?.length) continue;
     try {
-      h.fingers.forEach((f,i)=>{ const c = mount(`fp-${st.id}-${i}`, f.enhanced); if (f.ext) drawMinutiae(c, f.ext); });
+      h.fingers.forEach((f,i)=>{ mountImg(`fp-${st.id}-${i}`, f.enhanced, f.ext ? (c) => drawMinutiae(c, f.ext) : null); });
       // photo d'origine réduite, avec les cadres de découpe : permet de vérifier que les doigts ont bien été trouvés
-      if (h.overview){ const c = mount(`ov-${st.id}`, h.overview); c.className = 'overview'; const cap = document.createElement('div'); cap.className = 'hint'; cap.textContent = `Photo d'origine (${h.source}, ${h.frameSize.join('×')} px)`; $(`ov-${st.id}`).appendChild(cap); }
+      if (h.overview){ mountImg(`ov-${st.id}`, h.overview, null, 'overview'); const cap = document.createElement('div'); cap.className = 'hint'; cap.textContent = `Photo d'origine (${h.source}, ${h.frameSize.join('×')} px)`; $(`ov-${st.id}`).appendChild(cap); }
     } catch(e){ log(`affichage ${st.label.toLowerCase()} impossible : ${e.message}`); $(`ov-${st.id}`).textContent = 'Affichage impossible : ' + e.message; }
   }
   $('journalRevue').textContent = journal.join('\n');
@@ -1795,7 +1836,7 @@ $('b-new').onclick = () => location.reload();
 $('b-wasm').onclick = () => { const u = new URL(location.href); u.searchParams.set('backend','wasm'); location.href = u.toString(); };
 // Accès de test (ouvrir la page avec #debug)
 if (location.hash === '#debug') window.__proto = { S, CFG, runFingers, cameraHealthy, frameLayout, measureFrame, canonSample, scaleLayout, processFrame, captureStillFrame, captureHandFrame, rotate90, extractMinutiae, drawMinutiae, faceEmbedding, match, FINGERS, THUMB, STEPS, segmentFingers, cropSeg, segPpi, fingerKeys, captureStill, processImage, loadImage, openFingerCamera, videoSharpness, phalanxBox, journal, openSession, fingerQuality, ridgeEnhance, toGray, faceToken, renderReview, seal, simulatedServer, wipe, getHuman, keepCopy };
-const VERSION = 'v18 · 3 octobre 2026';
+const VERSION = 'v19 · 3 octobre 2026';
 $('version').textContent = 'Version ' + VERSION + ' · moteur ' + BACKEND;
 log('prototype chargé — ' + VERSION);
 </script>

@@ -41,6 +41,13 @@ vers la droite pour la main gauche), le bout de chaque doigt dans son cadre. Les
   la prise est alors marquée « sous la norme ». La résolution enregistrée est toujours mesurée sur la photo,
   d'après la largeur des doigts.
 
+Le cadrage est tolérant : un doigt un peu décalé ou un bout de doigt légèrement en deçà du cadre est accepté,
+car la découpe suit le doigt mesuré et non le cadre. Si les doigts restent trop petits dans leur cadre pendant
+7 secondes (téléphone qui ne peut pas s'approcher davantage), le cadre se réduit de 10 %.
+
+Sur iPhone, quand la photo du navigateur n'est pas plus définie que la vidéo, le prototype ne la prend plus
+et utilise l'image la plus nette de la rafale : l'aperçu n'est plus interrompu.
+
 L'ancienne disposition (main à plat sur une feuille blanche, doigts vers le haut) reste accessible en ajoutant
 `?disposition=fond` à l'adresse. Sur iPhone, `?objectif=triple` essaie la caméra virtuelle qui bascule
 automatiquement en mode macro.
