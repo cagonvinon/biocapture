@@ -28,11 +28,22 @@ Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en 
 
 ## Capture des empreintes
 
-Poser une feuille blanche (n'importe quel format) sur une table, puis la main dessus, dos contre le papier.
-La feuille ne sert que de fond uniforme : elle n'a pas besoin d'être entièrement visible.
-Doigts tendus vers le haut de l'écran et légèrement écartés. Rapprocher le téléphone jusqu'à ce que les
-doigts remplissent l'écran : la paume et le pouce peuvent sortir du cadre. Les doigts sont repérés par
-contraste avec le papier blanc ; l'échelle est estimée d'après la largeur des doigts.
+Depuis la v18, la main se présente de côté dans un cadre, comme le visage dans son ovale : paume vers
+l'objectif, doigts légèrement écartés et pointés vers le bord de l'écran (vers la gauche pour la main droite,
+vers la droite pour la main gauche), le bout de chaque doigt dans son cadre. Les pouces suivent, un par un.
+
+- Les quatre doigts s'étalent sur la hauteur de l'écran : on peut s'approcher sans qu'un doigt sorte du champ.
+- Le module ne cherche plus les doigts dans toute l'image : il vérifie que chaque cadre contient un bout de
+  doigt bien placé. La feuille blanche n'est plus obligatoire ; un fond clair et uni (mur, feuille, drap)
+  reste préférable, car la peau doit se distinguer du fond.
+- La taille du cadre fixe la résolution visée (500 ppi). Si les crêtes sont illisibles à cette taille
+  (téléphone trop près pour faire la mise au point), le cadre se réduit d'une prise à l'autre, jusqu'à 250 ppi ;
+  la prise est alors marquée « sous la norme ». La résolution enregistrée est toujours mesurée sur la photo,
+  d'après la largeur des doigts.
+
+L'ancienne disposition (main à plat sur une feuille blanche, doigts vers le haut) reste accessible en ajoutant
+`?disposition=fond` à l'adresse. Sur iPhone, `?objectif=triple` essaie la caméra virtuelle qui bascule
+automatiquement en mode macro.
 
 ## Résolution : ce que permet le navigateur
 
