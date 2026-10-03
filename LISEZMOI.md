@@ -28,12 +28,19 @@ Le premier chargement télécharge environ 13 Mo de modèles (jsDelivr), mis en 
 
 ## Capture des empreintes
 
-Depuis la v23, avec le gabarit par défaut (« cadres », aspect de la v19, taille fixe à l'écran), **le cadre fait foi** :
-le module ne cherche plus à compter les doigts ni à suivre leurs bouts. Il vérifie seulement, cadre par cadre, que
-le cadre est occupé par de la peau et que les crêtes y sont nettes. Trois consignes seulement : placer les bouts
-de doigts dans les cadres, ajuster doucement la distance jusqu'à ce que les cadres passent au vert, ne plus bouger.
-Couleur des cadres : blanc = vide, jaune = occupé, vert = crêtes nettes. La capture part dès que trois cadres sur
-quatre sont verts. La zone unique de la v21 reste disponible avec `?gabarit=zone`.
+Depuis la v24, le gabarit par défaut (« cadres », aspect de la v19, taille fixe à l'écran) reprend les critères qui
+avaient réussi en v19 : dans chaque cadre occupé, le doigt est repéré localement (bout, largeur, axe) ; il doit remplir
+à peu près son cadre (72 à 130 % de sa largeur) et y être à peu près centré, puis ses crêtes doivent être nettes.
+Le repérage reste local au cadre et chaque état est lissé sur six images : les consignes ne fluctuent plus.
+La consigne de distance (« rapprochez » / « éloignez ») n'est donnée que si la majorité des huit dernières images
+la confirme. Couleur des cadres : blanc = vide, jaune = doigt présent, vert = doigt placé et crêtes nettes.
+La découpe suit toujours le doigt repéré (jamais le cadre seul).
+
+**Pouces** : présentés à la verticale, poing fermé, pouce dressé vers le haut de l'écran, pulpe vers l'objectif,
+dans un cadre centré à la même échelle que les doigts.
+
+**Récapitulatif** : empreintes découpées avec leurs minuties ; visage de face, tourné à gauche et tourné à droite
+(le défi comprend toujours les deux rotations, plus la fermeture des yeux) avec leurs points caractéristiques.
 
 Dans les deux cas, la main se présente de côté dans un gabarit fixe, comme le visage dans son ovale : paume vers
 l'objectif, doigts légèrement écartés et pointés vers le bord de l'écran (vers la gauche pour la main droite,
